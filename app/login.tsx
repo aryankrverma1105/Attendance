@@ -69,7 +69,7 @@ export default function LoginScreen() {
       // Check Managed Users (Created by Admin)
       const existingUser = data.managedUsers.find((u) => {
         const uDigits = (u.identifier || "").replace(/[^0-9]/g, "");
-        return (uDigits && uDigits.includes(digitsOnly)) || u.identifier.toLowerCase() === cleanPhone.toLowerCase();
+        return (digitsOnly && uDigits.endsWith(digitsOnly)) || u.identifier.toLowerCase() === cleanPhone.toLowerCase();
       });
 
       if (!existingUser) {
@@ -82,8 +82,8 @@ export default function LoginScreen() {
         return;
       }
 
-      // Log in with assigned user role
-      signInToPreview(existingUser.identifier, existingUser.role);
+      // Log in with assigned user role and actual display name
+      signInToPreview(existingUser.identifier, existingUser.role, existingUser.displayName);
       router.replace("/(tabs)");
       return;
     }
@@ -92,7 +92,7 @@ export default function LoginScreen() {
     if (!isAdminAccount) {
       const existingUser = data.managedUsers.find((u) => {
         const uDigits = (u.identifier || "").replace(/[^0-9]/g, "");
-        return (uDigits && uDigits.includes(digitsOnly)) || u.identifier.toLowerCase() === cleanPhone.toLowerCase();
+        return (digitsOnly && uDigits.endsWith(digitsOnly)) || u.identifier.toLowerCase() === cleanPhone.toLowerCase();
       });
 
       if (!existingUser) {
@@ -178,17 +178,20 @@ export default function LoginScreen() {
           await setUserInfo(result.user);
 
           const mappedRole: FieldRole = result.user.role === "admin" ? "admin" : result.user.role === "manager" ? "manager" : "employee";
-          signInToPreview(result.user.phoneE164 || result.user.openId, mappedRole);
+          signInToPreview(result.user.phoneE164 || result.user.openId, mappedRole, result.user.name || undefined);
           router.replace("/(tabs)");
           return;
         }
       } catch (mutateErr) {
         console.warn("[Auth] Activation fallback:", mutateErr);
         if (isAdminAccount) {
-          signInToPreview("+919835916278", "admin");
+          signInToPreview("+919835916278", "admin", "Aryan Kumar Verma");
         } else {
-          const existingUser = data.managedUsers.find((u) => u.identifier.includes(digitsOnly));
-          signInToPreview(identifier.trim(), existingUser?.role || "employee");
+          const existingUser = data.managedUsers.find((u) => {
+            const uDigits = (u.identifier || "").replace(/[^0-9]/g, "");
+            return (digitsOnly && uDigits.endsWith(digitsOnly)) || u.identifier.toLowerCase() === identifier.trim().toLowerCase();
+          });
+          signInToPreview(existingUser ? existingUser.identifier : identifier.trim(), existingUser?.role || "employee", existingUser?.displayName);
         }
         router.replace("/(tabs)");
         return;

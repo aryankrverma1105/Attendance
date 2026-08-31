@@ -80,7 +80,7 @@ type VisitCaptureInput = AttendanceCaptureInput & {
 type FieldDataContextValue = {
   data: FieldWorkspace;
   isHydrated: boolean;
-  signInToPreview: (identifier: string, role?: FieldSession["role"]) => void;
+  signInToPreview: (identifier: string, role?: FieldSession["role"], displayName?: string) => void;
   signOut: () => void;
   createManagedUser: (input: Omit<ManagedUser, "id" | "accountLinkId" | "status" | "createdAt" | "accessIssuedAt">) => string;
   issueManagedUserAccess: (userId: string) => boolean;
@@ -140,13 +140,19 @@ function normalizeIdentifier(id: string): string {
   return id.trim().toLowerCase();
 }
 
-function buildPreviewSession(identifier: string, selectedRole?: FieldSession["role"]): FieldSession {
+function buildPreviewSession(identifier: string, selectedRole?: FieldSession["role"], customDisplayName?: string): FieldSession {
   const trimmedIdentifier = identifier.trim();
   const digits = trimmedIdentifier.replace(/[^0-9]/g, "");
   const isAdmin = digits.includes("9835916278") || trimmedIdentifier.toLowerCase().includes("admin") || selectedRole === "admin";
-  const displayName = isAdmin ? "Aryan Kumar Verma" : trimmedIdentifier.includes("@") ? trimmedIdentifier.split("@")[0] : "Field Employee";
-  const inferredRole = isAdmin ? "admin" : trimmedIdentifier.toLowerCase().includes("manager") || selectedRole === "manager" ? "manager" : "employee";
+  
+  let displayName = customDisplayName;
+  if (!displayName || displayName === "Field employee" || displayName === "Field Employee") {
+    if (isAdmin) displayName = "Aryan Kumar Verma";
+    else if (trimmedIdentifier.includes("@")) displayName = trimmedIdentifier.split("@")[0];
+    else displayName = "Technician";
+  }
 
+  const inferredRole = isAdmin ? "admin" : trimmedIdentifier.toLowerCase().includes("manager") || selectedRole === "manager" ? "manager" : "employee";
   const normalizedId = digits.length === 10 ? `+91${digits}` : trimmedIdentifier;
 
   return {
@@ -232,26 +238,37 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
     }
   }, [data, isHydrated]);
 
-  const signInToPreview = useCallback((identifier: string, role?: FieldSession["role"]) => {
-    const session = buildPreviewSession(identifier, role);
-    const normalizedKey = normalizeIdentifier(session.identifier);
-    const workspaceUser: ManagedUser = {
-      id: session.id,
-      accountLinkId: `account-${session.id}`,
-      displayName: session.displayName,
-      identifier: session.identifier,
-      role: session.role,
-      status: "active",
-      dailyWage: 0,
-      createdAt: session.signedInAt,
-    };
+  const signInToPreview = useCallback((identifier: string, role?: FieldSession["role"], customDisplayName?: string) => {
+    const normalizedKey = normalizeIdentifier(identifier);
+    let resolvedName = customDisplayName;
+    let resolvedRole = role;
+
     setData((current) => {
       const existingUser = current.managedUsers.find((user) => normalizeIdentifier(user.identifier) === normalizedKey);
+      if (existingUser) {
+        if (!resolvedName && existingUser.displayName && existingUser.displayName !== "Field employee" && existingUser.displayName !== "Field Employee") {
+          resolvedName = existingUser.displayName;
+        }
+        if (!resolvedRole) resolvedRole = existingUser.role;
+      }
+
+      const session = buildPreviewSession(identifier, resolvedRole, resolvedName);
+      const workspaceUser: ManagedUser = {
+        id: existingUser ? existingUser.id : session.id,
+        accountLinkId: existingUser ? existingUser.accountLinkId : `account-${session.id}`,
+        displayName: resolvedName || session.displayName,
+        identifier: session.identifier,
+        role: session.role,
+        status: existingUser ? existingUser.status : "active",
+        dailyWage: existingUser ? existingUser.dailyWage : 0,
+        createdAt: existingUser ? existingUser.createdAt : session.signedInAt,
+      };
+
       return {
         ...current,
         session,
         managedUsers: existingUser
-          ? current.managedUsers.map((user) => normalizeIdentifier(user.identifier) === normalizedKey ? { ...user, ...workspaceUser, id: user.id } : user)
+          ? current.managedUsers.map((user) => normalizeIdentifier(user.identifier) === normalizedKey ? { ...user, displayName: workspaceUser.displayName, role: workspaceUser.role } : user)
           : [workspaceUser, ...current.managedUsers],
       };
     });

@@ -35,10 +35,15 @@ export default function HomeScreen() {
   const isManager = user?.role === "manager";
 
   const managedUser = useMemo(() => {
-    const digits = (user?.identifier || "").replace(/[^0-9]/g, "");
+    const rawDigits = (user?.identifier || "").replace(/[^0-9]/g, "");
+    const last10 = rawDigits.length >= 10 ? rawDigits.slice(-10) : rawDigits;
     return data.managedUsers.find((u) => {
       const uDigits = (u.identifier || "").replace(/[^0-9]/g, "");
-      return (digits && uDigits && uDigits === digits) || (user?.id && u.id === user.id);
+      return (
+        (last10 && uDigits && (uDigits.endsWith(last10) || last10.endsWith(uDigits))) ||
+        (user?.id && u.id === user.id) ||
+        (u.identifier.toLowerCase() === (user?.identifier || "").toLowerCase())
+      );
     });
   }, [data.managedUsers, user]);
 
@@ -46,13 +51,14 @@ export default function HomeScreen() {
     if (managedUser?.displayName && managedUser.displayName !== "Field employee" && managedUser.displayName !== "Field Employee") {
       return managedUser.displayName;
     }
-    if (user?.displayName && user.displayName !== "Field employee" && user.displayName !== "Field Employee") {
-      return user.displayName;
+    const isSessionNameValid = user?.displayName && user.displayName !== "Field employee" && user.displayName !== "Field Employee" && !user.displayName.startsWith("+") && !/^\d+$/.test(user.displayName);
+    if (isSessionNameValid) {
+      return user!.displayName;
     }
     if (user?.role === "admin" || user?.identifier?.includes("9835916278")) {
       return "Aryan Kumar Verma";
     }
-    return user?.identifier || "Technician";
+    return "Technician";
   }, [managedUser, user]);
 
   // Employee attendance for today

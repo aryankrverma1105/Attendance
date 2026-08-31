@@ -48,21 +48,26 @@ export default function ProfileScreen() {
   };
 
   const managedUser = data.managedUsers.find((u) => {
-    const digits = (user?.identifier || "").replace(/[^0-9]/g, "");
+    const rawDigits = (user?.identifier || "").replace(/[^0-9]/g, "");
+    const last10 = rawDigits.length >= 10 ? rawDigits.slice(-10) : rawDigits;
     const uDigits = (u.identifier || "").replace(/[^0-9]/g, "");
-    return (digits && uDigits && uDigits === digits) || (user?.id && u.id === user.id);
+    return (
+      (last10 && uDigits && (uDigits.endsWith(last10) || last10.endsWith(uDigits))) ||
+      (user?.id && u.id === user.id) ||
+      (u.identifier.toLowerCase() === (user?.identifier || "").toLowerCase())
+    );
   });
 
   const userDisplayName =
     (managedUser?.displayName && managedUser.displayName !== "Field employee" && managedUser.displayName !== "Field Employee"
       ? managedUser.displayName
       : null) ||
-    (user?.displayName && user.displayName !== "Field employee" && user.displayName !== "Field Employee"
+    (user?.displayName && user.displayName !== "Field employee" && user.displayName !== "Field Employee" && !user.displayName.startsWith("+") && !/^\d+$/.test(user.displayName)
       ? user.displayName
       : null) ||
     (user?.role === "admin" || user?.identifier?.includes("9835916278")
       ? "Aryan Kumar Verma"
-      : user?.identifier || "Field Employee");
+      : "Field Employee");
 
   return (
     <ScreenContainer containerClassName="bg-background" className="flex-1">
