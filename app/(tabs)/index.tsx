@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Linking, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useRouter } from "expo-router";
 import MaterialIcons from "@expo/vector-icons/MaterialIcons";
 
@@ -10,6 +10,7 @@ import {
   calculateWorkedDays,
   calculateWorkingDaysInMonth,
   formatCurrency,
+  formatDay,
   formatTime,
   getDayKey,
   routeDistanceKm,
@@ -32,7 +33,6 @@ export default function HomeScreen() {
   const isEmployee = !user?.role || user?.role === "employee";
   const isAdmin = user?.role === "admin";
   const isManager = user?.role === "manager";
-  const isAdminOrManager = isAdmin || isManager;
 
   // Employee attendance for today
   const todayAttendance = data.attendance.find((record) => getDayKey(record.checkInAt) === today);
@@ -57,7 +57,6 @@ export default function HomeScreen() {
     [currentYear, currentMonth]
   );
 
-  // Daily wage applies exclusively to employees; admin & manager are salaried
   const userDailyWage = isEmployee ? (user?.dailyWage ?? 0) : 0;
   const calculatedEarnings = useMemo(
     () => (isEmployee ? calculateEarnings(workedDays, userDailyWage) : 0),
@@ -69,6 +68,17 @@ export default function HomeScreen() {
     () => data.visits.filter((visit) => getDayKey(visit.scheduledFor) === today),
     [data.visits, today]
   );
+
+  // Scoped team members for Manager
+  const scopedTeam = useMemo(() => {
+    if (isAdmin) return data.managedUsers.filter((u) => u.role === "employee");
+    if (isManager) {
+      return data.managedUsers.filter(
+        (u) => u.managerId === user?.id || (!u.managerId && u.role === "employee")
+      );
+    }
+    return [];
+  }, [data.managedUsers, isAdmin, isManager, user?.id]);
 
   // Tasks: Today's Tasks
   const todaysTasks = useMemo(() => {
@@ -82,584 +92,617 @@ export default function HomeScreen() {
       }
       return isToday;
     });
-  }, [data.tasks, data.managedUsers, user, isEmployee, isManager, todayDateStr, today]);
+  }, [data.tasks, data.managedUsers, isEmployee, isManager, user?.id, todayDateStr, today]);
 
-  // Management stats
-  const teamMembers = useMemo(() => {
-    if (isAdmin) return data.managedUsers;
-    if (isManager) return data.managedUsers.filter((u) => u.managerId === user?.id);
-    return [];
-  }, [data.managedUsers, isAdmin, isManager, user]);
+  const activeFieldWorkers = useMemo(() => {
+    return data.managedUsers.filter((u) => {
+      if (u.role !== "employee") return false;
+      return data.attendance.some(
+        (a) => a.employeeId === u.id && a.checkInAt.startsWith(todayDateStr)
+      );
+    });
+  }, [data.managedUsers, data.attendance, todayDateStr]);
 
-  const presentCount = useMemo(() => {
-    const presentIds = new Set(
-      data.attendance
-        .filter((a) => getDayKey(a.checkInAt) === today)
-        .map((a) => a.employeeId)
-        .filter(Boolean)
-    );
-    return teamMembers.filter((m) => presentIds.has(m.id)).length;
-  }, [data.attendance, teamMembers, today]);
+  // Total organization estimated monthly payroll
+  const totalOrgPayroll = useMemo(() => {
+    return data.managedUsers.reduce((total, u) => {
+      if (u.role !== "employee") return total;
+      const userAtt = data.attendance.filter((rec) => rec.employeeId === u.id);
+      const { workedDays: days } = calculateWorkedDays(userAtt, currentMonth, currentYear);
+      return total + calculateEarnings(days, u.dailyWage || 0);
+    }, 0);
+  }, [data.managedUsers, data.attendance, currentMonth, currentYear]);
 
-  const activeTrackingCount = useMemo(() => {
-    return data.routePoints.filter((pt) => pt.capturedAt?.startsWith(todayDateStr)).length > 0 ? 1 : 0;
-  }, [data.routePoints, todayDateStr]);
+  // tRPC mutation for task status update
+  const serverUpdateStatus = trpc.tasks.updateStatus.useMutation();
 
-  const pendingItems = data.offlineQueue.length;
-
-  const handleTaskStatusChange = (taskId: string, currentStatus: TaskStatus) => {
-    const nextStatus: TaskStatus =
-      currentStatus === "PENDING"
-        ? "IN_PROGRESS"
-        : currentStatus === "IN_PROGRESS"
-        ? "COMPLETED"
-        : "COMPLETED";
+  const handleStatusTransition = async (taskId: string, nextStatus: TaskStatus) => {
     updateTaskStatus(taskId, nextStatus);
+    await serverUpdateStatus.mutateAsync({
+      taskId: taskId,
+      status: nextStatus,
+    }).catch((err: unknown) => console.warn("[Tasks] Status sync queued:", err));
+  };
+
+  const openNavigation = (lat?: string, lng?: string, address?: string) => {
+    if (lat && lng) {
+      const url = Platform.select({
+        ios: `maps://app?daddr=${lat},${lng}`,
+        android: `google.navigation:q=${lat},${lng}`,
+        default: `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}`,
+      });
+      Linking.openURL(url!).catch(() => {
+        Linking.openURL(`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address || `${lat},${lng}`)}`);
+      });
+    } else if (address) {
+      Linking.openURL(`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`);
+    }
   };
 
   return (
     <ScreenContainer containerClassName="bg-background" className="flex-1">
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-        {/* Sunlight High-Contrast Header */}
-        <View style={styles.header}>
-          <View style={{ flex: 1 }}>
-            <View style={styles.kickerRow}>
-              <MaterialIcons color="#D97706" name="solar-power" size={15} />
-              <Text style={styles.kicker}>SOLOGIX FIELD FORCE</Text>
-            </View>
-            <Text style={styles.greeting}>
-              Good {now.getHours() < 12 ? "morning" : now.getHours() < 17 ? "afternoon" : "evening"},{" "}
-              {data.session?.displayName?.split(" ")[0] ?? "Aryan"} 👋
-            </Text>
-            <Text style={styles.date}>
-              {new Intl.DateTimeFormat(undefined, {
-                weekday: "long",
-                month: "long",
-                day: "numeric",
-              }).format(new Date())}
-            </Text>
-          </View>
-          <Pressable onPress={() => router.push("/(tabs)/profile")} style={styles.avatar}>
-            <Text style={styles.avatarText}>
-              {data.session?.displayName?.slice(0, 1).toUpperCase() ?? "A"}
-            </Text>
-          </Pressable>
-        </View>
-
-        {/* =========================================================================
-            ADMIN / MANAGER VIEW: Salaried Management Command Hub
-            ========================================================================= */}
-        {isAdminOrManager ? (
+        {/* ========================================================================= */}
+        {/* ADMIN DASHBOARD: Control & Organization Oversight                         */}
+        {/* ========================================================================= */}
+        {isAdmin ? (
           <>
-            {/* Management Hub Surface */}
-            <Surface style={styles.managementHubCard}>
-              <View style={styles.managementHeader}>
-                <View style={styles.managementIconWrap}>
-                  <MaterialIcons color="#D97706" name={isAdmin ? "admin-panel-settings" : "supervisor-account"} size={24} />
+            {/* Header */}
+            <View style={styles.header}>
+              <View style={{ flex: 1 }}>
+                <View style={styles.kickerRow}>
+                  <MaterialIcons color="#D97706" name="admin-panel-settings" size={14} />
+                  <Text style={styles.kicker}>ORGANIZATION CONTROL</Text>
                 </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.managementTitle}>
-                    {isAdmin ? "Enterprise Administrator Command" : "Manager Field Command"}
-                  </Text>
-                  <Text style={styles.managementSubtitle}>
-                    Salaried Management · {teamMembers.length} active team members
-                  </Text>
-                </View>
-                <Pressable
-                  onPress={() => router.push(isAdmin ? "/admin-dashboard" : "/tasks")}
-                  style={styles.actionRoundBtn}
-                >
-                  <MaterialIcons color="#0F172A" name="settings" size={18} />
-                </Pressable>
+                <Text style={styles.title}>Admin Command Hub</Text>
+                <Text style={styles.subtitle}>
+                  Executive oversight of Sologix Energy workforce & operations
+                </Text>
               </View>
+              <Pressable
+                onPress={() => router.push("/(tabs)/users" as any)}
+                style={styles.actionBtn}
+              >
+                <MaterialIcons color="#92400E" name="person-add" size={20} />
+              </Pressable>
+            </View>
 
-              <View style={styles.mgmtQuickBar}>
-                <FieldButton
-                  icon="add-task"
-                  label="Assign Task"
-                  onPress={() => router.push("/tasks")}
-                  style={{ flex: 1 }}
-                  variant="primary"
-                />
-                <FieldButton
-                  icon="route"
-                  label="Day Routes"
-                  onPress={() => router.push("/location-history")}
-                  style={{ flex: 1 }}
-                  variant="secondary"
-                />
-                {isAdmin ? (
-                  <FieldButton
-                    icon="person-add"
-                    label="Add User"
-                    onPress={() => router.push("/admin-dashboard")}
-                    style={{ flex: 1 }}
-                    variant="amber"
-                  />
-                ) : null}
-              </View>
-            </Surface>
-
-            {/* Management KPI Grid */}
-            <SectionHeading title="Workforce Overview" />
-            <View style={styles.metricGrid}>
+            {/* Key Organization KPI Cards */}
+            <View style={styles.metricsGrid}>
               <MetricCard
-                icon="groups"
-                label="Team Size"
-                subtitle="Active Members"
-                tone="navy"
-                value={`${teamMembers.length} Members`}
+                icon="people"
+                label="Total Users"
+                tone="success"
+                value={data.managedUsers.length.toString()}
               />
               <MetricCard
                 icon="how-to-reg"
-                label="Present Today"
-                subtitle={`${teamMembers.length - presentCount} Absent`}
+                label="On Shift Today"
+                tone="amber"
+                value={activeFieldWorkers.length.toString()}
+              />
+              <MetricCard
+                icon="payments"
+                label="Est. Payroll"
+                tone="navy"
+                value={formatCurrency(totalOrgPayroll)}
+              />
+            </View>
+
+            {/* Quick Action Matrix */}
+            <SectionHeading title="Management Quick Actions" />
+            <View style={styles.quickActionGrid}>
+              <Pressable
+                onPress={() => router.push("/(tabs)/users" as any)}
+                style={styles.quickActionCard}
+              >
+                <View style={[styles.quickActionIcon, { backgroundColor: "#FEF3C7" }]}>
+                  <MaterialIcons color="#D97706" name="manage-accounts" size={22} />
+                </View>
+                <Text style={styles.quickActionTitle}>User Directory</Text>
+                <Text style={styles.quickActionSubtitle}>Create & manage IDs</Text>
+              </Pressable>
+
+              <Pressable
+                onPress={() => router.push("/(tabs)/tasks" as any)}
+                style={styles.quickActionCard}
+              >
+                <View style={[styles.quickActionIcon, { backgroundColor: "#EFF6FF" }]}>
+                  <MaterialIcons color="#2563EB" name="assignment" size={22} />
+                </View>
+                <Text style={styles.quickActionTitle}>Work Orders</Text>
+                <Text style={styles.quickActionSubtitle}>View all {data.tasks.length} tasks</Text>
+              </Pressable>
+
+              <Pressable
+                onPress={() => router.push("/location-history" as any)}
+                style={styles.quickActionCard}
+              >
+                <View style={[styles.quickActionIcon, { backgroundColor: "#ECFDF5" }]}>
+                  <MaterialIcons color="#059669" name="route" size={22} />
+                </View>
+                <Text style={styles.quickActionTitle}>Route Playback</Text>
+                <Text style={styles.quickActionSubtitle}>Day-wise GPS history</Text>
+              </Pressable>
+
+              <Pressable
+                onPress={() => router.push("/(tabs)/reports" as any)}
+                style={styles.quickActionCard}
+              >
+                <View style={[styles.quickActionIcon, { backgroundColor: "#FFF7ED" }]}>
+                  <MaterialIcons color="#EA580C" name="insights" size={22} />
+                </View>
+                <Text style={styles.quickActionTitle}>Audit Reports</Text>
+                <Text style={styles.quickActionSubtitle}>Workforce analytics</Text>
+              </Pressable>
+            </View>
+
+            {/* Live Field Activity Stream */}
+            <SectionHeading
+              action={
+                <Pressable
+                  onPress={() => router.push("/location-history" as any)}
+                  style={styles.headerLinkBtn}
+                >
+                  <Text style={styles.headerLinkText}>GPS History</Text>
+                  <MaterialIcons color="#D97706" name="arrow-forward" size={13} />
+                </Pressable>
+              }
+              subtitle="Workers actively recorded on shift today"
+              title="Today's Field Activity"
+            />
+
+            {activeFieldWorkers.length > 0 ? (
+              <View style={styles.activityList}>
+                {activeFieldWorkers.map((emp) => (
+                  <Surface key={emp.id} style={styles.activityCard}>
+                    <View style={styles.avatar}>
+                      <Text style={styles.avatarText}>{emp.displayName.slice(0, 1)}</Text>
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.activityName}>{emp.displayName}</Text>
+                      <Text style={styles.activityMeta}>{emp.department || "Solar Operations"} · {emp.identifier}</Text>
+                    </View>
+                    <StatusChip label="Active" tone="success" />
+                  </Surface>
+                ))}
+              </View>
+            ) : (
+              <Surface style={styles.emptyCard}>
+                <MaterialIcons color="#D97706" name="person-off" size={28} />
+                <Text style={styles.emptyCardTitle}>No field check-ins recorded yet today.</Text>
+                <Text style={styles.emptyCardBody}>
+                  Field employees who verify attendance will appear here in real-time.
+                </Text>
+              </Surface>
+            )}
+          </>
+        ) : null}
+
+        {/* ========================================================================= */}
+        {/* MANAGER DASHBOARD: Team Operations & Dispatch                             */}
+        {/* ========================================================================= */}
+        {isManager ? (
+          <>
+            {/* Header */}
+            <View style={styles.header}>
+              <View style={{ flex: 1 }}>
+                <View style={styles.kickerRow}>
+                  <MaterialIcons color="#D97706" name="supervisor-account" size={14} />
+                  <Text style={styles.kicker}>TEAM OPERATIONS</Text>
+                </View>
+                <Text style={styles.title}>Manager Workspace</Text>
+                <Text style={styles.subtitle}>
+                  Supervising {scopedTeam.length} field technicians and work orders
+                </Text>
+              </View>
+              <Pressable
+                onPress={() => router.push("/(tabs)/tasks" as any)}
+                style={styles.actionBtn}
+              >
+                <MaterialIcons color="#92400E" name="add-task" size={20} />
+              </Pressable>
+            </View>
+
+            {/* Team Metric Cards */}
+            <View style={styles.metricsGrid}>
+              <MetricCard
+                icon="people"
+                label="Team Members"
+                tone="navy"
+                value={scopedTeam.length.toString()}
+              />
+              <MetricCard
+                icon="how-to-reg"
+                label="Active Today"
                 tone="success"
-                value={`${presentCount} Present`}
+                value={activeFieldWorkers.filter((u) => u.managerId === user?.id).length.toString()}
+              />
+              <MetricCard
+                icon="pending-actions"
+                label="Tasks Today"
+                tone="amber"
+                value={todaysTasks.length.toString()}
+              />
+            </View>
+
+            {/* Dispatch Banner */}
+            <Surface style={styles.dispatchBanner}>
+              <View style={styles.dispatchIconWrap}>
+                <MaterialIcons color="#D97706" name="add-task" size={24} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.dispatchTitle}>Assign Field Task</Text>
+                <Text style={styles.dispatchSubtitle}>
+                  Dispatch a work order with customer site location and priority.
+                </Text>
+              </View>
+              <Pressable
+                onPress={() => router.push("/(tabs)/tasks" as any)}
+                style={styles.dispatchBtn}
+              >
+                <Text style={styles.dispatchBtnText}>Assign</Text>
+                <MaterialIcons color="#0F172A" name="arrow-forward" size={14} />
+              </Pressable>
+            </Surface>
+
+            {/* Today's Team Work Orders */}
+            <SectionHeading
+              action={
+                <Pressable
+                  onPress={() => router.push("/(tabs)/tasks" as any)}
+                  style={styles.headerLinkBtn}
+                >
+                  <Text style={styles.headerLinkText}>All Orders</Text>
+                  <MaterialIcons color="#D97706" name="arrow-forward" size={13} />
+                </Pressable>
+              }
+              subtitle="Today's dispatched work orders"
+              title="Today's Work Orders"
+            />
+
+            {todaysTasks.length > 0 ? (
+              <View style={styles.activityList}>
+                {todaysTasks.map((task) => (
+                  <Surface key={task.id} style={styles.taskSummaryCard}>
+                    <View style={{ flex: 1, gap: 2 }}>
+                      <Text style={styles.taskSummaryTitle}>{task.title}</Text>
+                      <Text style={styles.taskSummaryMeta}>
+                        Worker: {task.assignedToName || "Assigned"} {task.customerName ? `· Client: ${task.customerName}` : ""}
+                      </Text>
+                    </View>
+                    <StatusChip
+                      label={task.status === "COMPLETED" ? "Done" : task.status === "IN_PROGRESS" ? "In Progress" : "Pending"}
+                      tone={task.status === "COMPLETED" ? "success" : task.status === "IN_PROGRESS" ? "solar" : "warning"}
+                    />
+                  </Surface>
+                ))}
+              </View>
+            ) : (
+              <Surface style={styles.emptyCard}>
+                <MaterialIcons color="#D97706" name="assignment-late" size={28} />
+                <Text style={styles.emptyCardTitle}>No work orders scheduled for today.</Text>
+                <Text style={styles.emptyCardBody}>
+                  Tap 'Assign' above to dispatch maintenance or inspection tasks to your team.
+                </Text>
+              </Surface>
+            )}
+          </>
+        ) : null}
+
+        {/* ========================================================================= */}
+        {/* EMPLOYEE DASHBOARD: Action & Field Execution                              */}
+        {/* ========================================================================= */}
+        {isEmployee ? (
+          <>
+            {/* Header */}
+            <View style={styles.header}>
+              <View style={{ flex: 1 }}>
+                <View style={styles.kickerRow}>
+                  <MaterialIcons color="#D97706" name="bolt" size={14} />
+                  <Text style={styles.kicker}>SOLAR FIELD SHIFT</Text>
+                </View>
+                <Text style={styles.title}>
+                  Hello, {user?.displayName?.split(" ")[0] || "Technician"}
+                </Text>
+                <Text style={styles.subtitle}>
+                  {new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" })}
+                </Text>
+              </View>
+            </View>
+
+            {/* Solar Attendance Card */}
+            <Surface style={styles.checkinCard}>
+              <View style={styles.checkinHeader}>
+                <View style={styles.checkinIconWrap}>
+                  <MaterialIcons
+                    color={needsCheckout ? "#10B981" : "#D97706"}
+                    name={needsCheckout ? "how-to-reg" : "access-time"}
+                    size={24}
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.checkinTitle}>
+                    {needsCheckout ? "Currently On Shift" : "Ready to Start Shift"}
+                  </Text>
+                  <Text style={styles.checkinSubtitle}>
+                    {needsCheckout
+                      ? `Checked in at ${formatTime(todayAttendance?.checkInAt)} · GPS Verified`
+                      : "Capture your morning GPS location to mark attendance."}
+                  </Text>
+                </View>
+              </View>
+
+              <FieldButton
+                icon={needsCheckout ? "logout" : "login"}
+                label={needsCheckout ? "Check out for today" : "Check in with GPS"}
+                onPress={() => router.push("/attendance")}
+                variant={needsCheckout ? "secondary" : "primary"}
+              />
+            </Surface>
+
+            {/* 4 Personal Metric Cards */}
+            <View style={styles.metricsGrid}>
+              <MetricCard
+                icon="event-available"
+                label="Worked Days"
+                tone="success"
+                value={`${workedDays} / ${workingDaysInMonth}`}
+              />
+              <MetricCard
+                icon="payments"
+                label="Month Earnings"
+                tone="amber"
+                value={formatCurrency(calculatedEarnings)}
               />
               <MetricCard
                 icon="assignment"
                 label="Today's Tasks"
-                onPress={() => router.push("/tasks")}
-                subtitle={`${todaysTasks.filter((t) => t.status === "COMPLETED").length} Completed`}
-                tone="amber"
-                value={`${todaysTasks.length} Orders`}
-              />
-              <MetricCard
-                icon="gps-fixed"
-                label="Tracking Now"
-                onPress={() => router.push("/location-history")}
-                subtitle="Live Field GPS"
-                tone="default"
-                value={`${teamMembers.length > 0 ? presentCount : 0} Live`}
-              />
-            </View>
-          </>
-        ) : (
-          /* =========================================================================
-             EMPLOYEE VIEW: 4 KPIs (Strictly NO Daily Wage card on Home) & Check-in Hero
-             ========================================================================= */
-          <>
-            {/* Today's Attendance Hero Banner — Sunlight High Contrast */}
-            <Surface style={styles.employeeHeroSurface}>
-              <View style={styles.heroHeader}>
-                <StatusChip
-                  label={
-                    needsCheckout
-                      ? "ON FIELD DUTY"
-                      : todayAttendance
-                      ? "ATTENDANCE COMPLETE"
-                      : "NOT CHECKED IN"
-                  }
-                  tone={needsCheckout ? "success" : todayAttendance ? "neutral" : "warning"}
-                />
-                <View style={styles.gpsBadge}>
-                  <MaterialIcons
-                    color={data.trackingActive ? "#059669" : "#D97706"}
-                    name={data.trackingActive ? "gps-fixed" : "gps-not-fixed"}
-                    size={14}
-                  />
-                  <Text style={styles.gpsText}>
-                    {data.trackingActive ? "GPS Active" : "GPS Ready"}
-                  </Text>
-                </View>
-              </View>
-
-              <View style={styles.heroCopy}>
-                <Text style={styles.heroTitle}>
-                  {needsCheckout
-                    ? "You’re actively checked in on field duty."
-                    : todayAttendance
-                    ? "Today's attendance shift captured."
-                    : "Ready to start today's field work?"}
-                </Text>
-                <Text style={styles.heroBody}>
-                  {needsCheckout
-                    ? `Checked in at ${formatTime(todayAttendance?.checkInAt)}. Record a verified check-out when your shift ends.`
-                    : todayAttendance
-                    ? `Shift recorded (${formatTime(todayAttendance.checkInAt)} → ${formatTime(todayAttendance.checkOutAt)}).`
-                    : "Capture photo and verified GPS coordinates to record your daily attendance."}
-                </Text>
-              </View>
-
-              <FieldButton
-                icon={needsCheckout ? "logout" : "verified-user"}
-                label={needsCheckout ? "Check out securely" : "Check in securely"}
-                onPress={() =>
-                  router.push({
-                    pathname: "/attendance",
-                    params: { action: needsCheckout ? "check-out" : "check-in" },
-                  })
-                }
-                style={styles.heroButton}
-                variant="primary"
-              />
-            </Surface>
-
-            {/* Four Primary KPI Cards (Strictly NO Daily Wage card) */}
-            <SectionHeading title="Work & Payout Summary" />
-            <View style={styles.metricGrid}>
-              {/* KPI 1 — WORKED DAYS */}
-              <MetricCard
-                icon="wb-sunny"
-                label="Worked Days"
-                subtitle="This Month"
-                tone="amber"
-                trend={`${workedDays} days verified`}
-                value={`${workedDays} Days`}
-              />
-
-              {/* KPI 2 — EARNINGS (Clickable to My Earnings drill-down) */}
-              <MetricCard
-                icon="payments"
-                label="Earnings"
-                onPress={() => router.push("/earnings" as any)}
-                subtitle="This Month"
-                tone="success"
-                trend="Tap for breakdown"
-                value={formatCurrency(calculatedEarnings)}
-              />
-
-              {/* KPI 3 — ATTENDANCE */}
-              <MetricCard
-                icon="how-to-reg"
-                label="Attendance"
-                subtitle="Working Days"
                 tone="navy"
-                value={`${workedDays} / ${workingDaysInMonth}`}
-              />
-
-              {/* KPI 4 — VISITS */}
-              <MetricCard
-                icon="storefront"
-                label="Visits"
-                onPress={() => router.push("/(tabs)/visits")}
-                subtitle="Today's Schedule"
-                value={String(todaysVisits.length)}
+                value={todaysTasks.length.toString()}
               />
             </View>
-          </>
-        )}
 
-        {/* =========================================================================
-            TODAY'S TASKS SECTION (Field Work Orders)
-            ========================================================================= */}
-        <SectionHeading
-          action={
-            <Pressable onPress={() => router.push("/tasks")} style={styles.textAction}>
-              <Text style={styles.textActionLabel}>View all tasks ({data.tasks.length})</Text>
-              <MaterialIcons color="#D97706" name="arrow-forward" size={15} />
-            </Pressable>
-          }
-          subtitle={`${todaysTasks.length} work orders scheduled for today`}
-          title="Today’s Tasks"
-        />
+            {/* Today's Tasks */}
+            <SectionHeading
+              action={
+                <Pressable
+                  onPress={() => router.push("/(tabs)/tasks" as any)}
+                  style={styles.headerLinkBtn}
+                >
+                  <Text style={styles.headerLinkText}>All Tasks</Text>
+                  <MaterialIcons color="#D97706" name="arrow-forward" size={13} />
+                </Pressable>
+              }
+              subtitle="Your scheduled field work orders"
+              title="Today's Tasks"
+            />
 
-        {todaysTasks.length === 0 ? (
-          <Surface style={styles.emptyTaskSurface}>
-            <View style={styles.emptyIconWrap}>
-              <MaterialIcons color="#D97706" name="assignment-turned-in" size={24} />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.emptyTaskTitle}>No pending tasks for today</Text>
-              <Text style={styles.emptyTaskSub}>
-                {isAdminOrManager
-                  ? "Tap 'Assign Task' above to dispatch a work order to your field engineers."
-                  : "Your daily task itinerary is clear. Check back later or plan a customer visit."}
-              </Text>
-            </View>
-            {isAdminOrManager ? (
-              <Pressable onPress={() => router.push("/tasks")} style={styles.actionRoundBtn}>
-                <MaterialIcons color="#0F172A" name="add" size={18} />
-              </Pressable>
-            ) : null}
-          </Surface>
-        ) : (
-          todaysTasks.slice(0, 3).map((task) => {
-            const canUpdate = canUpdateTaskStatus({
-              actorRole: user?.role,
-              actorId: user?.id,
-              assignedToUserId: task.assignedToUserId,
-            });
-
-            return (
-              <Surface key={task.id} style={styles.taskCard}>
-                <View style={styles.taskHeader}>
-                  <View style={{ flex: 1 }}>
-                    <View style={styles.badgeRow}>
+            {todaysTasks.length > 0 ? (
+              <View style={styles.activityList}>
+                {todaysTasks.map((t) => (
+                  <Surface key={t.id} style={styles.employeeTaskCard}>
+                    <View style={styles.employeeTaskTop}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.employeeTaskTitle}>{t.title}</Text>
+                        {t.customerName ? (
+                          <Text style={styles.employeeTaskClient}>Client: {t.customerName}</Text>
+                        ) : null}
+                      </View>
                       <StatusChip
-                        label={task.priority}
-                        tone={
-                          task.priority === "URGENT" || task.priority === "HIGH"
-                            ? "danger"
-                            : task.priority === "MEDIUM"
-                            ? "solar"
-                            : "neutral"
-                        }
-                      />
-                      <StatusChip
-                        label={task.status.replace("_", " ")}
-                        tone={
-                          task.status === "COMPLETED"
-                            ? "success"
-                            : task.status === "IN_PROGRESS"
-                            ? "solar"
-                            : "neutral"
-                        }
+                        label={t.priority}
+                        tone={t.priority === "URGENT" || t.priority === "HIGH" ? "danger" : "solar"}
                       />
                     </View>
-                    <Text style={styles.taskCardTitle}>{task.title}</Text>
-                  </View>
-                </View>
 
-                {task.customerName ? (
-                  <View style={styles.taskMetaRow}>
-                    <MaterialIcons color="#D97706" name="storefront" size={14} />
-                    <Text style={styles.taskMetaText}>{task.customerName}</Text>
-                  </View>
-                ) : null}
+                    {t.locationAddress ? (
+                      <View style={styles.locationRow}>
+                        <MaterialIcons color="#64748B" name="place" size={14} />
+                        <Text numberOfLines={1} style={styles.locationText}>{t.locationAddress}</Text>
+                      </View>
+                    ) : null}
 
-                {task.locationAddress ? (
-                  <View style={styles.taskMetaRow}>
-                    <MaterialIcons color="#64748B" name="place" size={14} />
-                    <Text style={styles.taskMetaText}>{task.locationAddress}</Text>
-                  </View>
-                ) : null}
+                    <View style={styles.taskActionRow}>
+                      {t.locationAddress || t.locationLat ? (
+                        <Pressable
+                          onPress={() => openNavigation(t.locationLat, t.locationLng, t.locationAddress)}
+                          style={styles.navBtn}
+                        >
+                          <MaterialIcons color="#2563EB" name="directions" size={14} />
+                          <Text style={styles.navBtnText}>Directions</Text>
+                        </Pressable>
+                      ) : null}
 
-                {isEmployee && canUpdate && task.status !== "COMPLETED" ? (
-                  <View style={styles.taskActions}>
-                    {task.status === "PENDING" ? (
-                      <FieldButton
-                        icon="play-arrow"
-                        label="Start Task"
-                        onPress={() => handleTaskStatusChange(task.id, "PENDING")}
-                        style={{ flex: 1 }}
-                        variant="primary"
-                      />
-                    ) : (
-                      <FieldButton
-                        icon="check-circle"
-                        label="Complete Task"
-                        onPress={() => handleTaskStatusChange(task.id, "IN_PROGRESS")}
-                        style={{ flex: 1 }}
-                        variant="primary"
-                      />
-                    )}
-                  </View>
-                ) : null}
+                      {t.status === "PENDING" ? (
+                        <Pressable
+                          onPress={() => handleStatusTransition(t.id, "IN_PROGRESS")}
+                          style={styles.startTaskBtn}
+                        >
+                          <MaterialIcons color="#0F172A" name="play-arrow" size={14} />
+                          <Text style={styles.startTaskBtnText}>Start</Text>
+                        </Pressable>
+                      ) : null}
+
+                      {t.status === "IN_PROGRESS" ? (
+                        <Pressable
+                          onPress={() => handleStatusTransition(t.id, "COMPLETED")}
+                          style={styles.completeTaskBtn}
+                        >
+                          <MaterialIcons color="#FFFFFF" name="check" size={14} />
+                          <Text style={styles.completeTaskBtnText}>Complete</Text>
+                        </Pressable>
+                      ) : null}
+
+                      {t.status === "COMPLETED" ? (
+                        <StatusChip label="Completed" tone="success" />
+                      ) : null}
+                    </View>
+                  </Surface>
+                ))}
+              </View>
+            ) : (
+              <Surface style={styles.emptyCard}>
+                <MaterialIcons color="#10B981" name="task-alt" size={28} />
+                <Text style={styles.emptyCardTitle}>No work orders scheduled for today.</Text>
+                <Text style={styles.emptyCardBody}>
+                  You are all set! New tasks dispatched by your manager will appear here.
+                </Text>
               </Surface>
-            );
-          })
-        )}
-
-        {/* Quick Actions Bar */}
-        <SectionHeading title="Quick actions" />
-        <View style={styles.quickActions}>
-          <Pressable
-            onPress={() => router.push(isAdminOrManager ? "/tasks" : "/visit-plan")}
-            style={({ pressed }) => [styles.quickAction, pressed && styles.pressed]}
-          >
-            <View style={[styles.quickIconWrap, { backgroundColor: "#FEF3C7" }]}>
-              <MaterialIcons color="#D97706" name={isAdminOrManager ? "assignment" : "add-location-alt"} size={22} />
-            </View>
-            <Text style={styles.quickLabel}>{isAdminOrManager ? "Tasks" : "Plan visit"}</Text>
-          </Pressable>
-
-          <Pressable
-            onPress={() => router.push("/location-history")}
-            style={({ pressed }) => [styles.quickAction, pressed && styles.pressed]}
-          >
-            <View style={[styles.quickIconWrap, { backgroundColor: "#EFF6FF" }]}>
-              <MaterialIcons color="#2563EB" name="route" size={22} />
-            </View>
-            <Text style={styles.quickLabel}>GPS Routes</Text>
-          </Pressable>
-
-          {isEmployee ? (
-            <Pressable
-              onPress={() => router.push("/earnings" as any)}
-              style={({ pressed }) => [styles.quickAction, pressed && styles.pressed]}
-            >
-              <View style={[styles.quickIconWrap, { backgroundColor: "#ECFDF5" }]}>
-                <MaterialIcons color="#059669" name="payments" size={22} />
-              </View>
-              <Text style={styles.quickLabel}>My Earnings</Text>
-            </Pressable>
-          ) : (
-            <Pressable
-              onPress={() => router.push("/admin-dashboard")}
-              style={({ pressed }) => [styles.quickAction, pressed && styles.pressed]}
-            >
-              <View style={[styles.quickIconWrap, { backgroundColor: "#ECFDF5" }]}>
-                <MaterialIcons color="#059669" name="people" size={22} />
-              </View>
-              <Text style={styles.quickLabel}>Team</Text>
-            </Pressable>
-          )}
-
-          <Pressable
-            onPress={() => router.push("/offline-queue")}
-            style={({ pressed }) => [styles.quickAction, pressed && styles.pressed]}
-          >
-            <View style={[styles.quickIconWrap, { backgroundColor: "#F1F5F9" }]}>
-              <MaterialIcons color="#334155" name="sync" size={22} />
-            </View>
-            <Text style={styles.quickLabel}>Queue ({pendingItems})</Text>
-          </Pressable>
-        </View>
+            )}
+          </>
+        ) : null}
       </ScrollView>
     </ScreenContainer>
   );
 }
 
 const styles = StyleSheet.create({
-  content: { padding: 18, paddingBottom: 36, gap: 18 },
-  header: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 16 },
-  kickerRow: { flexDirection: "row", alignItems: "center", gap: 5, marginBottom: 4 },
-  kicker: { color: "#D97706", fontWeight: "900", fontSize: 10, letterSpacing: 1.3 },
-  greeting: { color: "#0F172A", fontWeight: "900", fontSize: 24, letterSpacing: -0.6 },
-  date: { color: "#475569", marginTop: 3, fontSize: 13, fontWeight: "600" },
-  avatar: {
+  content: { padding: 18, gap: 16, paddingBottom: 40 },
+  header: { flexDirection: "row", alignItems: "center", gap: 12 },
+  kickerRow: { flexDirection: "row", alignItems: "center", gap: 5, marginBottom: 2 },
+  kicker: { color: "#D97706", fontSize: 10, letterSpacing: 1.2, fontWeight: "900" },
+  title: { color: "#0F172A", fontSize: 24, fontWeight: "900", letterSpacing: -0.4 },
+  subtitle: { color: "#64748B", fontSize: 12, marginTop: 2 },
+  actionBtn: {
     width: 44,
     height: 44,
+    borderRadius: 14,
+    backgroundColor: "#FEF3C7",
+    borderWidth: 1,
+    borderColor: "#FDE68A",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  metricsGrid: { flexDirection: "row", gap: 10 },
+  quickActionGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
+  quickActionCard: {
+    width: "48%",
+    backgroundColor: "#FFFFFF",
+    borderWidth: 1,
+    borderColor: "#E2E8F0",
     borderRadius: 16,
-    backgroundColor: "#FEF3C7",
-    borderWidth: 1,
-    borderColor: "#FDE68A",
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  avatarText: { color: "#92400E", fontWeight: "900", fontSize: 18 },
-
-  // Management Hub
-  managementHubCard: {
-    padding: 16,
-    backgroundColor: "#FFFFFF",
-    borderColor: "#E2E8F0",
-    gap: 14,
-  },
-  managementHeader: { flexDirection: "row", alignItems: "center", gap: 12 },
-  managementIconWrap: {
-    width: 44,
-    height: 44,
-    borderRadius: 14,
-    backgroundColor: "#FEF3C7",
-    borderWidth: 1,
-    borderColor: "#FDE68A",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  managementTitle: { color: "#0F172A", fontSize: 16, fontWeight: "900" },
-  managementSubtitle: { color: "#475569", fontSize: 12, marginTop: 2, fontWeight: "600" },
-  actionRoundBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 12,
-    backgroundColor: "#F1F5F9",
-    borderWidth: 1,
-    borderColor: "#CBD5E1",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  mgmtQuickBar: { flexDirection: "row", gap: 8 },
-
-  // Employee Hero Surface — Sunlight Optimized Light Card
-  employeeHeroSurface: {
-    padding: 18,
-    backgroundColor: "#FFFBEB",
-    borderColor: "#FDE68A",
-    borderWidth: 1.5,
-    borderRadius: 22,
-    gap: 12,
-  },
-  heroHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-  },
-  gpsBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 5,
-    backgroundColor: "#FFFFFF",
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: "#E2E8F0",
-  },
-  gpsText: { color: "#0F172A", fontSize: 11, fontWeight: "800" },
-  heroCopy: { gap: 4 },
-  heroTitle: {
-    color: "#0F172A",
-    fontSize: 18,
-    fontWeight: "900",
-    letterSpacing: -0.3,
-  },
-  heroBody: { color: "#334155", fontSize: 13, lineHeight: 18 },
-  heroButton: { marginTop: 4 },
-
-  metricGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
-  textAction: { flexDirection: "row", alignItems: "center", gap: 4 },
-  textActionLabel: { color: "#D97706", fontSize: 12, fontWeight: "800" },
-
-  // Tasks Section
-  emptyTaskSurface: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    padding: 16,
-    backgroundColor: "#FFFFFF",
-    borderColor: "#E2E8F0",
-  },
-  emptyIconWrap: {
-    width: 42,
-    height: 42,
-    borderRadius: 14,
-    backgroundColor: "#FEF3C7",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  emptyTaskTitle: { color: "#0F172A", fontSize: 14, fontWeight: "800" },
-  emptyTaskSub: { color: "#64748B", fontSize: 12, lineHeight: 16, marginTop: 2 },
-  taskCard: {
     padding: 14,
-    gap: 8,
-    backgroundColor: "#FFFFFF",
-    borderColor: "#E2E8F0",
+    gap: 4,
   },
-  taskHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" },
-  badgeRow: { flexDirection: "row", gap: 6, marginBottom: 4 },
-  taskCardTitle: { color: "#0F172A", fontSize: 15, fontWeight: "900" },
-  taskMetaRow: { flexDirection: "row", alignItems: "center", gap: 6 },
-  taskMetaText: { color: "#334155", fontSize: 12, fontWeight: "600" },
-  taskActions: { marginTop: 6, flexDirection: "row", gap: 8 },
-
-  quickActions: { flexDirection: "row", gap: 10 },
-  quickAction: {
-    flex: 1,
-    backgroundColor: "#FFFFFF",
-    borderWidth: 1,
-    borderColor: "#E2E8F0",
-    minHeight: 88,
-    borderRadius: 18,
-    padding: 10,
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  quickIconWrap: {
-    width: 38,
-    height: 38,
+  quickActionIcon: {
+    width: 40,
+    height: 40,
     borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
     marginBottom: 4,
   },
-  quickLabel: {
-    color: "#0F172A",
-    fontSize: 11,
-    fontWeight: "800",
-    textAlign: "center",
+  quickActionTitle: { color: "#0F172A", fontSize: 14, fontWeight: "800" },
+  quickActionSubtitle: { color: "#64748B", fontSize: 11 },
+  headerLinkBtn: { flexDirection: "row", alignItems: "center", gap: 3 },
+  headerLinkText: { color: "#D97706", fontSize: 12, fontWeight: "800" },
+  activityList: { gap: 10 },
+  activityCard: { flexDirection: "row", alignItems: "center", gap: 12, padding: 14 },
+  avatar: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: "#FEF3C7",
+    alignItems: "center",
+    justifyContent: "center",
   },
-  pressed: { transform: [{ scale: 0.97 }], opacity: 0.88 },
+  avatarText: { color: "#92400E", fontWeight: "900", fontSize: 16 },
+  activityName: { color: "#0F172A", fontSize: 14, fontWeight: "800" },
+  activityMeta: { color: "#64748B", fontSize: 11, marginTop: 1 },
+  emptyCard: { alignItems: "center", gap: 8, paddingVertical: 28 },
+  emptyCardTitle: { color: "#0F172A", fontSize: 15, fontWeight: "800" },
+  emptyCardBody: {
+    color: "#64748B",
+    textAlign: "center",
+    fontSize: 12,
+    lineHeight: 18,
+    maxWidth: 270,
+  },
+  dispatchBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    padding: 16,
+    borderColor: "#FDE68A",
+    backgroundColor: "#FFFDF7",
+  },
+  dispatchIconWrap: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    backgroundColor: "#FEF3C7",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  dispatchTitle: { color: "#0F172A", fontSize: 15, fontWeight: "900" },
+  dispatchSubtitle: { color: "#64748B", fontSize: 12, lineHeight: 16, marginTop: 2 },
+  dispatchBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: "#FEF3C7",
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 10,
+  },
+  dispatchBtnText: { color: "#0F172A", fontSize: 11, fontWeight: "800" },
+  taskSummaryCard: { flexDirection: "row", alignItems: "center", gap: 10, padding: 14 },
+  taskSummaryTitle: { color: "#0F172A", fontSize: 14, fontWeight: "800" },
+  taskSummaryMeta: { color: "#64748B", fontSize: 11, marginTop: 2 },
+  checkinCard: {
+    padding: 16,
+    gap: 14,
+    borderColor: "#FDE68A",
+    backgroundColor: "#FFFDF7",
+  },
+  checkinHeader: { flexDirection: "row", alignItems: "center", gap: 12 },
+  checkinIconWrap: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    backgroundColor: "#FEF3C7",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  checkinTitle: { color: "#0F172A", fontSize: 16, fontWeight: "900" },
+  checkinSubtitle: { color: "#64748B", fontSize: 12, lineHeight: 16, marginTop: 2 },
+  employeeTaskCard: { padding: 14, gap: 10 },
+  employeeTaskTop: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", gap: 8 },
+  employeeTaskTitle: { color: "#0F172A", fontSize: 14, fontWeight: "800" },
+  employeeTaskClient: { color: "#D97706", fontSize: 11, fontWeight: "700", marginTop: 2 },
+  locationRow: { flexDirection: "row", alignItems: "center", gap: 4 },
+  locationText: { color: "#64748B", fontSize: 11, flex: 1 },
+  taskActionRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8, marginTop: 2 },
+  navBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: "#EFF6FF",
+    borderWidth: 1,
+    borderColor: "#BFDBFE",
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+  },
+  navBtnText: { color: "#2563EB", fontSize: 11, fontWeight: "800" },
+  startTaskBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: "#FEF3C7",
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+  },
+  startTaskBtnText: { color: "#0F172A", fontSize: 11, fontWeight: "800" },
+  completeTaskBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: "#059669",
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+  },
+  completeTaskBtnText: { color: "#FFFFFF", fontSize: 11, fontWeight: "800" },
 });

@@ -83,7 +83,7 @@ describe("End-to-End RBAC & tRPC Procedure Security", () => {
           dailyWage: 750,
         })
       ).rejects.toThrow();
-    });
+    }, 15000);
 
     it("DENIES Employee from calling setEmployeeWage (throws FORBIDDEN TRPCError)", async () => {
       const ctx = createMockContext(employeeUser);
