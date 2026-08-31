@@ -36,9 +36,11 @@ export default function TabLayout() {
 const styles = StyleSheet.create({
   tabBar: {
     position: "absolute",
-    left: "6%",
-    width: "88%",
+    left: 16,
+    right: 16,
     bottom: 12,
+    marginHorizontal: "auto",
+    maxWidth: 500,
     backgroundColor: "transparent",
     borderTopWidth: 0,
     borderRadius: 28,
