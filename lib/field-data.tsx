@@ -133,21 +133,26 @@ function verificationStatus(location: LocationEvidence): AttendanceRecord["statu
   return classifyLocationEvidence(location);
 }
 
+function normalizeIdentifier(id: string): string {
+  const digits = id.replace(/[^0-9]/g, "");
+  if (digits.length === 10) return `+91${digits}`;
+  if (digits.length > 10 && digits.startsWith("91")) return `+${digits}`;
+  return id.trim().toLowerCase();
+}
+
 function buildPreviewSession(identifier: string, selectedRole?: FieldSession["role"]): FieldSession {
   const trimmedIdentifier = identifier.trim();
-  const displayName = trimmedIdentifier.includes("@")
-    ? trimmedIdentifier.split("@")[0]
-    : "Field employee";
-  const inferredRole = trimmedIdentifier.toLowerCase().includes("admin")
-    ? "admin"
-    : trimmedIdentifier.toLowerCase().includes("manager")
-      ? "manager"
-      : "employee";
+  const digits = trimmedIdentifier.replace(/[^0-9]/g, "");
+  const isAdmin = digits.includes("9835916278") || trimmedIdentifier.toLowerCase().includes("admin") || selectedRole === "admin";
+  const displayName = isAdmin ? "Aryan Kumar Verma" : trimmedIdentifier.includes("@") ? trimmedIdentifier.split("@")[0] : "Field Employee";
+  const inferredRole = isAdmin ? "admin" : trimmedIdentifier.toLowerCase().includes("manager") || selectedRole === "manager" ? "manager" : "employee";
+
+  const normalizedId = digits.length === 10 ? `+91${digits}` : trimmedIdentifier;
 
   return {
     id: createId("preview-user"),
-    identifier: trimmedIdentifier,
-    displayName: displayName || "Field employee",
+    identifier: normalizedId,
+    displayName: displayName,
     role: selectedRole ?? inferredRole,
     isPreview: true,
     signedInAt: new Date().toISOString(),
@@ -174,7 +179,25 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
         if (!active) return;
         const parsedWorkspace = workspaceValue ? (JSON.parse(workspaceValue) as Partial<FieldWorkspace>) : {};
         const parsedSession = sessionValue ? (JSON.parse(sessionValue) as FieldSession) : null;
-        setData({ ...emptyWorkspace, ...parsedWorkspace, session: parsedSession });
+        
+        // Auto-deduplicate users by normalized phone/email
+        const rawUsers = parsedWorkspace.managedUsers || [];
+        const seen = new Set<string>();
+        const dedupedUsers: ManagedUser[] = [];
+        for (const u of rawUsers) {
+          const key = normalizeIdentifier(u.identifier);
+          if (!seen.has(key)) {
+            seen.add(key);
+            const isAdm = key.includes("9835916278") || u.role === "admin";
+            dedupedUsers.push({
+              ...u,
+              identifier: key.startsWith("+91") ? key : u.identifier,
+              displayName: isAdm && (u.displayName === "Field employee" || !u.displayName) ? "Aryan Kumar Verma" : u.displayName,
+            });
+          }
+        }
+
+        setData({ ...emptyWorkspace, ...parsedWorkspace, managedUsers: dedupedUsers, session: parsedSession });
       })
       .catch(() => {
         if (active) setData(emptyWorkspace);
@@ -211,6 +234,7 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
 
   const signInToPreview = useCallback((identifier: string, role?: FieldSession["role"]) => {
     const session = buildPreviewSession(identifier, role);
+    const normalizedKey = normalizeIdentifier(session.identifier);
     const workspaceUser: ManagedUser = {
       id: session.id,
       accountLinkId: `account-${session.id}`,
@@ -222,12 +246,12 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
       createdAt: session.signedInAt,
     };
     setData((current) => {
-      const existingUser = current.managedUsers.find((user) => user.identifier.toLowerCase() === session.identifier.toLowerCase());
+      const existingUser = current.managedUsers.find((user) => normalizeIdentifier(user.identifier) === normalizedKey);
       return {
         ...current,
         session,
         managedUsers: existingUser
-          ? current.managedUsers.map((user) => user.identifier.toLowerCase() === session.identifier.toLowerCase() ? { ...user, ...workspaceUser, id: user.id } : user)
+          ? current.managedUsers.map((user) => normalizeIdentifier(user.identifier) === normalizedKey ? { ...user, ...workspaceUser, id: user.id } : user)
           : [workspaceUser, ...current.managedUsers],
       };
     });

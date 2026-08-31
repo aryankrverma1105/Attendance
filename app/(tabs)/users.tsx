@@ -61,7 +61,13 @@ export default function AdminUsersScreen() {
   }, [data.managedUsers]);
 
   const visibleUsers = useMemo(() => {
+    const seen = new Set<string>();
     return data.managedUsers.filter((user) => {
+      const digits = (user.identifier || "").replace(/[^0-9]/g, "");
+      const key = digits.length >= 10 ? digits.slice(-10) : user.identifier.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+
       const matchesQuery = `${user.displayName} ${user.identifier} ${user.role} ${
         user.department ?? ""
       }`
