@@ -47,6 +47,23 @@ export default function ProfileScreen() {
     );
   };
 
+  const managedUser = data.managedUsers.find((u) => {
+    const digits = (user?.identifier || "").replace(/[^0-9]/g, "");
+    const uDigits = (u.identifier || "").replace(/[^0-9]/g, "");
+    return (digits && uDigits && uDigits === digits) || (user?.id && u.id === user.id);
+  });
+
+  const userDisplayName =
+    (managedUser?.displayName && managedUser.displayName !== "Field employee" && managedUser.displayName !== "Field Employee"
+      ? managedUser.displayName
+      : null) ||
+    (user?.displayName && user.displayName !== "Field employee" && user.displayName !== "Field Employee"
+      ? user.displayName
+      : null) ||
+    (user?.role === "admin" || user?.identifier?.includes("9835916278")
+      ? "Aryan Kumar Verma"
+      : user?.identifier || "Field Employee");
+
   return (
     <ScreenContainer containerClassName="bg-background" className="flex-1">
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
@@ -54,11 +71,11 @@ export default function ProfileScreen() {
         <View style={styles.profileTop}>
           <View style={styles.avatar}>
             <Text style={styles.avatarText}>
-              {user?.displayName?.slice(0, 1).toUpperCase() ?? "A"}
+              {userDisplayName.slice(0, 1).toUpperCase()}
             </Text>
           </View>
           <View style={{ flex: 1 }}>
-            <Text style={styles.name}>{user?.displayName ?? "Field Employee"}</Text>
+            <Text style={styles.name}>{userDisplayName}</Text>
             <Text style={styles.identifier}>{user?.identifier ?? "No identifier"}</Text>
             <StatusChip
               label={

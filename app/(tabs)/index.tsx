@@ -34,6 +34,27 @@ export default function HomeScreen() {
   const isAdmin = user?.role === "admin";
   const isManager = user?.role === "manager";
 
+  const managedUser = useMemo(() => {
+    const digits = (user?.identifier || "").replace(/[^0-9]/g, "");
+    return data.managedUsers.find((u) => {
+      const uDigits = (u.identifier || "").replace(/[^0-9]/g, "");
+      return (digits && uDigits && uDigits === digits) || (user?.id && u.id === user.id);
+    });
+  }, [data.managedUsers, user]);
+
+  const userDisplayName = useMemo(() => {
+    if (managedUser?.displayName && managedUser.displayName !== "Field employee" && managedUser.displayName !== "Field Employee") {
+      return managedUser.displayName;
+    }
+    if (user?.displayName && user.displayName !== "Field employee" && user.displayName !== "Field Employee") {
+      return user.displayName;
+    }
+    if (user?.role === "admin" || user?.identifier?.includes("9835916278")) {
+      return "Aryan Kumar Verma";
+    }
+    return user?.identifier || "Technician";
+  }, [managedUser, user]);
+
   // Employee attendance for today
   const todayAttendance = data.attendance.find((record) => getDayKey(record.checkInAt) === today);
   const needsCheckout = Boolean(todayAttendance && !todayAttendance.checkOutAt);
@@ -403,7 +424,7 @@ export default function HomeScreen() {
                   <Text style={styles.kicker}>SOLAR FIELD SHIFT</Text>
                 </View>
                 <Text style={styles.title}>
-                  Hello, {user?.displayName?.split(" ")[0] || "Technician"}
+                  Hello, {userDisplayName}
                 </Text>
                 <Text style={styles.subtitle}>
                   {new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" })}
