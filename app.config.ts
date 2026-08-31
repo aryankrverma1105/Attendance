@@ -1,4 +1,5 @@
 import "./scripts/load-env.js";
+import fs from "fs";
 import type { ExpoConfig } from "expo/config";
 
 const rawBundleId = "space.manus.field.attendance";
@@ -44,7 +45,7 @@ const config: ExpoConfig = {
     },
     edgeToEdgeEnabled: true,
     predictiveBackGestureEnabled: false,
-    googleServicesFile: "./google-services.json",
+    googleServicesFile: process.env.GOOGLE_SERVICES_JSON ?? (fs.existsSync("./google-services.json") ? "./google-services.json" : undefined),
     package: env.androidPackage,
     permissions: [
       "POST_NOTIFICATIONS",
