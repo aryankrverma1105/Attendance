@@ -23,6 +23,9 @@ const config: ExpoConfig = {
   userInterfaceStyle: "light",
   newArchEnabled: true,
   extra: {
+    eas: {
+      projectId: "70259b92-a6b4-4b09-8a28-6b7d9dd88cd2",
+    },
     companyName: "Sologix Energy Pvt Ltd",
     developerName: "Aryan Kumar Verma",
     brandTagline: "Energizing Naturally",
