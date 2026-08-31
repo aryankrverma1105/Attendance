@@ -2,7 +2,7 @@ import { z } from "zod";
 import { COOKIE_NAME } from "../shared/const.js";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
-import { publicProcedure, router } from "./_core/trpc";
+import { publicProcedure, router, protectedProcedure } from "./_core/trpc";
 import { verifyFirebaseToken } from "./_core/firebase";
 import { sdk } from "./_core/sdk";
 import {
@@ -16,7 +16,6 @@ import {
   updateUserDailyWage,
   getEmployeeWorkedDaysAndEarnings,
 } from "./db";
-import { protectedProcedure } from "./_core/trpc";
 import { TRPCError } from "@trpc/server";
 
 export const appRouter = router({
@@ -67,7 +66,6 @@ export const appRouter = router({
             };
           } else {
             try {
-              // Search for a pending invitation
               const invitation = await getActiveInvitationByPhone(phoneE164);
 
               if (invitation) {
@@ -79,7 +77,6 @@ export const appRouter = router({
                   invitation.role
                 );
               } else {
-                // Fallback: auto-activate first-time admin or developers for preview
                 user = await autoActivateUser(
                   decodedToken.uid,
                   phoneE164,
@@ -109,7 +106,6 @@ export const appRouter = router({
             throw new Error("Failed to activate user account");
           }
 
-          // Establish session and set session cookie
           const sessionToken = await sdk.createSessionToken(user.openId, {
             name: user.name || user.email || user.phoneE164 || "Employee",
           });
@@ -139,43 +135,81 @@ export const appRouter = router({
   workforce: router({
     /**
      * Authenticated employee dashboard stats computed securely on server.
+     * Prevents client spoofing by deriving target employee strictly from session.
      */
-    getEmployeeDashboard: protectedProcedure.query(async ({ ctx }) => {
-      const userId = ctx.user.id;
-      const now = new Date();
-      const year = now.getFullYear();
-      const month = now.getMonth() + 1;
+    getEmployeeDashboard: protectedProcedure
+      .input(z.object({ targetUserId: z.number().optional() }).optional())
+      .query(async ({ ctx, input }) => {
+        let targetId = ctx.user.id;
 
-      // Calculate working days in current month excluding Sundays
-      let workingDaysInMonth = 0;
-      const daysInMonth = new Date(year, month, 0).getDate();
-      for (let d = 1; d <= daysInMonth; d++) {
-        const dayOfWeek = new Date(year, month - 1, d).getDay();
-        if (dayOfWeek !== 0) workingDaysInMonth++; // Exclude Sunday
-      }
+        if (input?.targetUserId && input.targetUserId !== ctx.user.id) {
+          if (ctx.user.role === "admin") {
+            targetId = input.targetUserId;
+          } else if (ctx.user.role === "manager") {
+            const targetUser = await getUserById(input.targetUserId);
+            if (targetUser?.managerId !== ctx.user.id) {
+              throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Cannot access employee outside your assigned team." });
+            }
+            targetId = input.targetUserId;
+          } else {
+            throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Employees can only access their own dashboard." });
+          }
+        }
 
-      const financialStats = await getEmployeeWorkedDaysAndEarnings(userId, year, month);
+        const now = new Date();
+        const year = now.getFullYear();
+        const month = now.getMonth() + 1;
 
-      return {
-        userId,
-        name: ctx.user.name || "Employee",
-        role: ctx.user.role,
-        workedDays: financialStats.workedDays,
-        workingDaysInMonth,
-        calculatedEarnings: financialStats.calculatedEarnings,
-        dailyWage: financialStats.dailyWage || ctx.user.dailyWage || 0,
-        monthName: now.toLocaleString("default", { month: "long" }),
-        year,
-      };
-    }),
+        let workingDaysInMonth = 0;
+        const daysInMonth = new Date(year, month, 0).getDate();
+        for (let d = 1; d <= daysInMonth; d++) {
+          const dayOfWeek = new Date(year, month - 1, d).getDay();
+          if (dayOfWeek !== 0) workingDaysInMonth++;
+        }
+
+        const financialStats = await getEmployeeWorkedDaysAndEarnings(targetId, year, month);
+        const targetUser = targetId === ctx.user.id ? ctx.user : await getUserById(targetId);
+
+        return {
+          userId: targetId,
+          name: targetUser?.name || "Employee",
+          role: targetUser?.role || "employee",
+          workedDays: financialStats.workedDays,
+          workingDaysInMonth,
+          calculatedEarnings: financialStats.calculatedEarnings,
+          dailyWage: financialStats.dailyWage || targetUser?.dailyWage || 0,
+          monthName: now.toLocaleString("default", { month: "long" }),
+          year,
+        };
+      }),
 
     /**
      * Monthly earnings history with accurate effective wage rate calculations.
      */
     getEarningsHistory: protectedProcedure
-      .input(z.object({ monthsCount: z.number().min(1).max(12).default(6) }))
+      .input(
+        z.object({
+          monthsCount: z.number().min(1).max(12).default(6),
+          targetUserId: z.number().optional(),
+        })
+      )
       .query(async ({ ctx, input }) => {
-        const userId = ctx.user.id;
+        let targetId = ctx.user.id;
+
+        if (input.targetUserId && input.targetUserId !== ctx.user.id) {
+          if (ctx.user.role === "admin") {
+            targetId = input.targetUserId;
+          } else if (ctx.user.role === "manager") {
+            const targetUser = await getUserById(input.targetUserId);
+            if (targetUser?.managerId !== ctx.user.id) {
+              throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Cannot access employee earnings outside your team." });
+            }
+            targetId = input.targetUserId;
+          } else {
+            throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Employees can only access their own earnings history." });
+          }
+        }
+
         const now = new Date();
         const results = [];
 
@@ -185,7 +219,7 @@ export const appRouter = router({
           const month = date.getMonth() + 1;
           const monthName = date.toLocaleString("default", { month: "long" });
 
-          const stats = await getEmployeeWorkedDaysAndEarnings(userId, year, month);
+          const stats = await getEmployeeWorkedDaysAndEarnings(targetId, year, month);
           results.push({
             year,
             month,
@@ -205,7 +239,7 @@ export const appRouter = router({
      */
     getAdminOverview: protectedProcedure.query(async ({ ctx }) => {
       if (ctx.user.role !== "admin") {
-        throw new TRPCError({ code: "FORBIDDEN", message: "Admin access required" });
+        throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Admin access required." });
       }
 
       const allUsers = await getAllUsers();
@@ -213,7 +247,6 @@ export const appRouter = router({
       const managerCount = allUsers.filter((u) => u.role === "manager").length;
       const employeeCount = allUsers.filter((u) => u.role === "employee").length;
 
-      // Calculate total monthly payroll estimate across all active employees
       const now = new Date();
       const year = now.getFullYear();
       const month = now.getMonth() + 1;
@@ -225,7 +258,6 @@ export const appRouter = router({
         let workedDaysThisMonth = 0;
         let earningsThisMonth = 0;
 
-        // Admin & Manager are salaried management and excluded from daily-wage payroll calculations
         if (u.role === "employee") {
           const stats = await getEmployeeWorkedDaysAndEarnings(u.id, year, month);
           workedDaysThisMonth = stats.workedDays;
@@ -262,7 +294,7 @@ export const appRouter = router({
      */
     getManagerOverview: protectedProcedure.query(async ({ ctx }) => {
       if (ctx.user.role !== "manager" && ctx.user.role !== "admin") {
-        throw new TRPCError({ code: "FORBIDDEN", message: "Manager access required" });
+        throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Manager access required." });
       }
 
       const teamUsers =
@@ -308,6 +340,22 @@ export const appRouter = router({
         teamMonthlyPayroll,
         teamMembers: teamSummaries,
       };
+    }),
+
+    /**
+     * Scoped list of users:
+     * - Admin: all users
+     * - Manager: own assigned team only
+     * - Employee: forbidden
+     */
+    listUsers: protectedProcedure.query(async ({ ctx }) => {
+      if (ctx.user.role === "admin") {
+        return await getAllUsers();
+      } else if (ctx.user.role === "manager") {
+        return await getUsersByManagerId(ctx.user.id);
+      } else {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Employees do not have directory access." });
+      }
     }),
 
     /**
@@ -359,6 +407,29 @@ export const appRouter = router({
         }
         const { createUserByAdmin } = await import("./db");
         return await createUserByAdmin(ctx.user, input);
+      }),
+
+    /**
+     * Update user account status (suspend, pause, reactivate, deactivate).
+     */
+    updateUserStatus: protectedProcedure
+      .input(
+        z.object({
+          targetUserId: z.number().int().positive(),
+          accountStatus: z.enum(["active", "suspended", "removed"]).optional(),
+          role: z.enum(["admin", "manager", "employee"]).optional(),
+          managerId: z.number().nullable().optional(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        if (ctx.user.role !== "admin") {
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "Forbidden: Only Administrators can update user lifecycle status.",
+          });
+        }
+        const { updateUserStatusByAdmin } = await import("./db");
+        return await updateUserStatusByAdmin(ctx.user, input);
       }),
   }),
 
@@ -413,7 +484,7 @@ export const appRouter = router({
       )
       .mutation(async ({ ctx, input }) => {
         if (ctx.user.role !== "admin" && ctx.user.role !== "manager") {
-          throw new TRPCError({ code: "FORBIDDEN", message: "Only Admin and Managers can assign tasks." });
+          throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Only Admin and Managers can assign tasks." });
         }
         const { createTask } = await import("./db");
         return await createTask(ctx.user, input);
@@ -435,6 +506,69 @@ export const appRouter = router({
       }),
   }),
 
+  attendance: router({
+    /**
+     * Employee check-in with GPS and photo evidence.
+     * Strictly forbidden for Admin and Manager.
+     */
+    checkIn: protectedProcedure
+      .input(
+        z.object({
+          checkInPhotoUri: z.string().optional(),
+          checkInLat: z.string().optional(),
+          checkInLng: z.string().optional(),
+          checkInAccuracy: z.number().optional(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        if (ctx.user.role !== "employee") {
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "Forbidden: Check-in is an operational action restricted strictly to field employees.",
+          });
+        }
+        const { recordAttendanceCheckIn } = await import("./db");
+        return await recordAttendanceCheckIn(ctx.user, input);
+      }),
+
+    /**
+     * Employee check-out.
+     * Strictly forbidden for Admin and Manager.
+     */
+    checkOut: protectedProcedure
+      .input(
+        z.object({
+          checkOutPhotoUri: z.string().optional(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        if (ctx.user.role !== "employee") {
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "Forbidden: Check-out is an operational action restricted strictly to field employees.",
+          });
+        }
+        const { recordAttendanceCheckOut } = await import("./db");
+        return await recordAttendanceCheckOut(ctx.user, input);
+      }),
+
+    /**
+     * Scoped attendance history query.
+     */
+    getHistory: protectedProcedure
+      .input(
+        z.object({
+          targetUserId: z.number().optional(),
+          month: z.number().optional(),
+          year: z.number().optional(),
+        })
+      )
+      .query(async ({ ctx, input }) => {
+        const { getAttendanceRecords } = await import("./db");
+        return await getAttendanceRecords(ctx.user, input.targetUserId, input.month, input.year);
+      }),
+  }),
+
   tracking: router({
     /**
      * Get day-wise GPS history with route timeline and distance.
@@ -453,6 +587,7 @@ export const appRouter = router({
 
     /**
      * Record a GPS point during route tracking.
+     * Strictly restricted to field employees only.
      */
     recordPoint: protectedProcedure
       .input(
@@ -465,11 +600,65 @@ export const appRouter = router({
         })
       )
       .mutation(async ({ ctx, input }) => {
+        if (ctx.user.role !== "employee") {
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "Forbidden: GPS tracking is an operational tool restricted exclusively to field employees.",
+          });
+        }
         const { recordGpsPoint } = await import("./db");
         return await recordGpsPoint(ctx.user.id, input);
       }),
   }),
+
+  audit: router({
+    /**
+     * Read system audit logs. Strictly Admin only.
+     */
+    getLogs: protectedProcedure.query(async ({ ctx }) => {
+      if (ctx.user.role !== "admin") {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Audit logs are restricted to Administrators." });
+      }
+      const { getAuditLogs } = await import("./db");
+      return await getAuditLogs(ctx.user);
+    }),
+  }),
+
+  reports: router({
+    /**
+     * Organization-wide report. Strictly Admin only.
+     */
+    getOrganizationReport: protectedProcedure.query(async ({ ctx }) => {
+      if (ctx.user.role !== "admin") {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Organization reports are restricted to Administrators." });
+      }
+      const { getAllUsers, getAllTasks } = await import("./db");
+      const usersList = await getAllUsers();
+      const tasksList = await getAllTasks();
+      return {
+        totalUsers: usersList.length,
+        totalTasks: tasksList.length,
+        completedTasks: tasksList.filter((t) => t.status === "COMPLETED").length,
+      };
+    }),
+
+    /**
+     * Team report. Admin or Manager (scoped to own team).
+     */
+    getTeamReport: protectedProcedure.query(async ({ ctx }) => {
+      if (ctx.user.role !== "admin" && ctx.user.role !== "manager") {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Team reports are restricted to Managers and Administrators." });
+      }
+      const { getUsersByManagerId, getTasksByManagerId } = await import("./db");
+      const teamUsers = ctx.user.role === "admin" ? await (await import("./db")).getAllUsers() : await getUsersByManagerId(ctx.user.id);
+      const teamTasks = ctx.user.role === "admin" ? await (await import("./db")).getAllTasks() : await getTasksByManagerId(ctx.user.id);
+      return {
+        teamSize: teamUsers.length,
+        teamTasksCount: teamTasks.length,
+        teamCompletedTasks: teamTasks.filter((t) => t.status === "COMPLETED").length,
+      };
+    }),
+  }),
 });
 
 export type AppRouter = typeof appRouter;
-

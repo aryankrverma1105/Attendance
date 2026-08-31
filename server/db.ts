@@ -733,3 +733,168 @@ export async function getDayGpsHistory(
   };
 }
 
+/**
+ * Update user status, role, or manager assignment by Admin.
+ * Soft-deactivates or updates without deleting historical data.
+ */
+export async function updateUserStatusByAdmin(
+  actorUser: User,
+  input: {
+    targetUserId: number;
+    accountStatus?: "active" | "suspended" | "removed";
+    role?: "admin" | "manager" | "employee";
+    managerId?: number | null;
+  }
+): Promise<{ success: boolean; user?: User }> {
+  if (actorUser.role !== "admin") {
+    throw new Error("Forbidden: Only Administrators can update user status and roles.");
+  }
+
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable.");
+
+  const targetUser = await getUserById(input.targetUserId);
+  if (!targetUser) throw new Error("Target user not found.");
+
+  const updates: Partial<User> = { updatedAt: new Date() };
+  if (input.accountStatus) updates.accountStatus = input.accountStatus;
+  if (input.role) updates.role = input.role;
+  if (input.managerId !== undefined) updates.managerId = input.managerId;
+
+  await db.update(users).set(updates).where(eq(users.id, input.targetUserId));
+
+  // Create audit event
+  const auditId = `audit-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  await db.insert(auditEvents).values({
+    id: auditId,
+    actorUserOpenId: actorUser.openId,
+    subjectUserOpenId: targetUser.openId,
+    action: input.accountStatus === "removed" ? "user.deactivated" : "user.status_updated",
+    detail: `Updated user ${targetUser.name || targetUser.id} (${JSON.stringify(input)})`,
+  });
+
+  const updated = await getUserById(input.targetUserId);
+  return { success: true, user: updated };
+}
+
+/**
+ * Server-side Attendance Verification System
+ */
+export async function recordAttendanceCheckIn(
+  employeeUser: User,
+  input: {
+    checkInPhotoUri?: string;
+    checkInLat?: string;
+    checkInLng?: string;
+    checkInAccuracy?: number;
+  }
+): Promise<any> {
+  if (employeeUser.role !== "employee") {
+    throw new Error("Forbidden: Attendance check-in is restricted exclusively to field employees.");
+  }
+
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable.");
+
+  const id = `att-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const now = new Date();
+
+  await db.insert(attendanceRecords).values({
+    id,
+    userId: employeeUser.id,
+    checkInAt: now,
+    status: "verified",
+    checkInPhotoUri: input.checkInPhotoUri,
+    checkInLat: input.checkInLat,
+    checkInLng: input.checkInLng,
+    checkInAccuracy: input.checkInAccuracy,
+  });
+
+  const record = await db.select().from(attendanceRecords).where(eq(attendanceRecords.id, id)).limit(1);
+  return record[0];
+}
+
+export async function recordAttendanceCheckOut(
+  employeeUser: User,
+  input: {
+    checkOutPhotoUri?: string;
+  }
+): Promise<any> {
+  if (employeeUser.role !== "employee") {
+    throw new Error("Forbidden: Attendance check-out is restricted exclusively to field employees.");
+  }
+
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable.");
+
+  // Find latest active attendance record for this user today
+  const activeRecords = await db
+    .select()
+    .from(attendanceRecords)
+    .where(and(eq(attendanceRecords.userId, employeeUser.id)))
+    .orderBy(desc(attendanceRecords.checkInAt))
+    .limit(1);
+
+  if (activeRecords.length === 0 || activeRecords[0].checkOutAt) {
+    throw new Error("No active check-in session found to check out from.");
+  }
+
+  const targetRecord = activeRecords[0];
+  const now = new Date();
+
+  await db
+    .update(attendanceRecords)
+    .set({
+      checkOutAt: now,
+      checkOutPhotoUri: input.checkOutPhotoUri,
+    })
+    .where(eq(attendanceRecords.id, targetRecord.id));
+
+  const updated = await db.select().from(attendanceRecords).where(eq(attendanceRecords.id, targetRecord.id)).limit(1);
+  return updated[0];
+}
+
+export async function getAttendanceRecords(
+  actorUser: User,
+  targetUserId?: number,
+  month?: number,
+  year?: number
+): Promise<any[]> {
+  const db = await getDb();
+  if (!db) return [];
+
+  const targetId = targetUserId ?? actorUser.id;
+  const targetUser = await getUserById(targetId);
+  if (!targetUser) throw new Error("Target user not found.");
+
+  // RBAC Authorization check
+  if (actorUser.role === "admin") {
+    // Admin can view all
+  } else if (actorUser.role === "manager") {
+    if (targetUser.managerId !== actorUser.id && targetUser.id !== actorUser.id) {
+      throw new Error("Forbidden: Managers can only view attendance for employees in their own team.");
+    }
+  } else {
+    if (actorUser.id !== targetId) {
+      throw new Error("Forbidden: Employees can only view their own attendance records.");
+    }
+  }
+
+  let query = db.select().from(attendanceRecords).where(eq(attendanceRecords.userId, targetId));
+  return await query.orderBy(desc(attendanceRecords.checkInAt));
+}
+
+/**
+ * Get audit logs for sensitive operations.
+ */
+export async function getAuditLogs(actorUser: User): Promise<any[]> {
+  if (actorUser.role !== "admin") {
+    throw new Error("Forbidden: Only Administrators can access audit logs.");
+  }
+
+  const db = await getDb();
+  if (!db) return [];
+
+  return await db.select().from(auditEvents).orderBy(desc(auditEvents.occurredAt)).limit(100);
+}
+
