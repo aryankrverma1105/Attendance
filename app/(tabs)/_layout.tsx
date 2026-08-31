@@ -1,15 +1,15 @@
 import { Platform, StyleSheet } from "react-native";
 import { Tabs } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import MaterialIcons from "@expo/vector-icons/MaterialIcons";
 
 import { HapticTab } from "@/components/haptic-tab";
-import { IconSymbol } from "@/components/ui/icon-symbol";
 import { LiquidGlassTabBackground } from "@/components/liquid-glass-tab-background";
 import { useFieldData } from "@/lib/field-data";
 
 export default function TabLayout() {
   const insets = useSafeAreaInsets();
-  const bottomPadding = Platform.OS === "web" ? 8 : Math.max(insets.bottom, 8);
+  const bottomPadding = Platform.OS === "web" ? 10 : Math.max(insets.bottom, 10);
   const { data } = useFieldData();
 
   const role = data.session?.role || "employee";
@@ -22,43 +22,54 @@ export default function TabLayout() {
       screenOptions={{
         headerShown: false,
         tabBarActiveTintColor: "#D97706",
-        tabBarInactiveTintColor: "#1E293B",
+        tabBarInactiveTintColor: "#64748B",
         tabBarButton: HapticTab,
         tabBarBackground: () => <LiquidGlassTabBackground />,
-        sceneStyle: { marginBottom: 69 + bottomPadding },
-        tabBarStyle: [styles.tabBar, { height: 60 + bottomPadding, paddingBottom: bottomPadding + 2 }],
+        sceneStyle: { marginBottom: 72 + bottomPadding },
+        tabBarStyle: [
+          styles.tabBar,
+          { height: 64 + bottomPadding, paddingBottom: bottomPadding + 2 },
+        ],
         tabBarLabelStyle: styles.label,
         tabBarItemStyle: styles.tabItem,
       }}
     >
-      {/* 1. Primary Home/Dashboard Screen (Shared by All Roles) */}
+      {/* 1. Primary Home / Dashboard Screen (Shared by All Roles) */}
       <Tabs.Screen
         name="index"
         options={{
           title: isAdmin ? "Dashboard" : isManager ? "Dashboard" : "Home",
-          tabBarIcon: ({ color }) => (
-            <IconSymbol color={color} name={isAdmin ? "chart.bar.fill" : isManager ? "house.fill" : "house.fill"} size={24} />
+          tabBarIcon: ({ color, focused }) => (
+            <MaterialIcons
+              color={color}
+              name={isAdmin ? "dashboard" : "home"}
+              size={24}
+            />
           ),
         }}
       />
 
-      {/* 2. Admin Users Tab (Admin Only) */}
+      {/* 2. Admin Users Tab (Admin Only - 5 Tab Suite) */}
       <Tabs.Screen
         name="users"
         options={{
           title: "Users",
           href: isAdmin ? "/(tabs)/users" : null,
-          tabBarIcon: ({ color }) => <IconSymbol color={color} name="person.3.fill" size={24} />,
+          tabBarIcon: ({ color }) => (
+            <MaterialIcons color={color} name="people" size={24} />
+          ),
         }}
       />
 
-      {/* 3. Manager Team Tab (Manager Only) */}
+      {/* 3. Manager Team Tab (Manager Only - 5 Tab Suite) */}
       <Tabs.Screen
         name="team"
         options={{
           title: "My Team",
           href: isManager ? "/(tabs)/team" : null,
-          tabBarIcon: ({ color }) => <IconSymbol color={color} name="person.3.fill" size={24} />,
+          tabBarIcon: ({ color }) => (
+            <MaterialIcons color={color} name="groups" size={24} />
+          ),
         }}
       />
 
@@ -67,47 +78,57 @@ export default function TabLayout() {
         name="tasks"
         options={{
           title: "Tasks",
-          tabBarIcon: ({ color }) => <IconSymbol color={color} name="checklist" size={24} />,
+          tabBarIcon: ({ color }) => (
+            <MaterialIcons color={color} name="assignment" size={24} />
+          ),
         }}
       />
 
-      {/* 5. Employee Visits Tab (Employee Only) */}
+      {/* 5. Employee Visits Tab (Employee Only - 5 Tab Suite) */}
       <Tabs.Screen
         name="visits"
         options={{
           title: "Visits",
           href: isEmployee ? "/(tabs)/visits" : null,
-          tabBarIcon: ({ color }) => <IconSymbol color={color} name="calendar" size={24} />,
+          tabBarIcon: ({ color }) => (
+            <MaterialIcons color={color} name="event" size={24} />
+          ),
         }}
       />
 
-      {/* 6. Employee Track Tab (Employee Only) */}
+      {/* 6. Employee Track Tab (Employee Only - 5 Tab Suite) */}
       <Tabs.Screen
         name="track"
         options={{
           title: "Track",
           href: isEmployee ? "/(tabs)/track" : null,
-          tabBarIcon: ({ color }) => <IconSymbol color={color} name="location.fill" size={24} />,
+          tabBarIcon: ({ color }) => (
+            <MaterialIcons color={color} name="my-location" size={24} />
+          ),
         }}
       />
 
-      {/* 7. Manager Operational Map Tab (Manager Only) */}
+      {/* 7. Manager Operational Map Tab (Manager Only - 5 Tab Suite) */}
       <Tabs.Screen
         name="map"
         options={{
           title: "Team Map",
           href: isManager ? "/(tabs)/map" : null,
-          tabBarIcon: ({ color }) => <IconSymbol color={color} name="map.fill" size={24} />,
+          tabBarIcon: ({ color }) => (
+            <MaterialIcons color={color} name="map" size={24} />
+          ),
         }}
       />
 
-      {/* 8. Reports Tab (Admin & Manager) */}
+      {/* 8. Admin Reports Tab (Admin Only - 5 Tab Suite) */}
       <Tabs.Screen
         name="reports"
         options={{
           title: "Reports",
-          href: isAdmin || isManager ? "/(tabs)/reports" : null,
-          tabBarIcon: ({ color }) => <IconSymbol color={color} name="chart.bar.fill" size={24} />,
+          href: isAdmin ? "/(tabs)/reports" : null,
+          tabBarIcon: ({ color }) => (
+            <MaterialIcons color={color} name="bar-chart" size={24} />
+          ),
         }}
       />
 
@@ -116,7 +137,9 @@ export default function TabLayout() {
         name="profile"
         options={{
           title: "Profile",
-          tabBarIcon: ({ color }) => <IconSymbol color={color} name="person.fill" size={24} />,
+          tabBarIcon: ({ color }) => (
+            <MaterialIcons color={color} name="person" size={24} />
+          ),
         }}
       />
     </Tabs>
@@ -134,7 +157,7 @@ const styles = StyleSheet.create({
     backgroundColor: "transparent",
     borderTopWidth: 0,
     borderRadius: 28,
-    paddingTop: 6,
+    paddingTop: 8,
     elevation: 20,
     shadowColor: "#0B192C",
     shadowOpacity: 0.18,
@@ -142,6 +165,15 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 8 },
     overflow: "visible",
   },
-  tabItem: { paddingHorizontal: 0 },
-  label: { fontSize: 11, fontWeight: "900", marginTop: 2, letterSpacing: -0.1 },
+  tabItem: {
+    paddingHorizontal: 0,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  label: {
+    fontSize: 11,
+    fontWeight: "800",
+    marginTop: 2,
+    letterSpacing: -0.2,
+  },
 });
