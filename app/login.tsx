@@ -13,11 +13,10 @@ import type { FieldRole } from "@/lib/field-types";
 
 export default function LoginScreen() {
   const router = useRouter();
-  const { signInToPreview } = useFieldData();
+  const { data, signInToPreview } = useFieldData();
   const [identifier, setIdentifier] = useState("");
-  const [mode, setMode] = useState<"otp" | "password">("otp");
+  const [mode, setMode] = useState<"password" | "otp">("password");
   const [password, setPassword] = useState("");
-  const [previewRole, setPreviewRole] = useState<"employee" | "manager" | "admin">("employee");
   const [notice, setNotice] = useState<string | null>(null);
 
   const [verificationStep, setVerificationStep] = useState<"request" | "verify">("request");
@@ -29,7 +28,7 @@ export default function LoginScreen() {
   const requestAuthentication = async () => {
     let cleanPhone = identifier.trim();
     if (!cleanPhone) {
-      setNotice("Enter your registered mobile number first.");
+      setNotice("Enter your registered mobile number or administrator identifier.");
       return;
     }
 
@@ -44,16 +43,60 @@ export default function LoginScreen() {
     
     setNotice(null);
 
+    const digitsOnly = cleanPhone.replace(/[^0-9]/g, "");
+    const isAdminAccount = digitsOnly.includes("9835916278") || cleanPhone.toLowerCase().includes("admin");
+
     if (mode === "password") {
       if (!password.trim()) {
         setNotice("Please enter your password.");
         return;
       }
-      const clean = identifier.trim().replace(/[^0-9]/g, "");
-      const isUserAdmin = clean.includes("9835916278") || identifier.toLowerCase().includes("admin");
-      signInToPreview(identifier.trim() || "+919835916278", isUserAdmin ? "admin" : previewRole);
+
+      // Check Administrator Credentials
+      if (isAdminAccount) {
+        if (password === "Sologix12345") {
+          signInToPreview("+919835916278", "admin");
+          router.replace("/(tabs)");
+          return;
+        } else {
+          setNotice("Incorrect password for Administrator account.");
+          return;
+        }
+      }
+
+      // Check Managed Users (Created by Admin)
+      const existingUser = data.managedUsers.find((u) => {
+        const uDigits = (u.identifier || "").replace(/[^0-9]/g, "");
+        return (uDigits && uDigits.includes(digitsOnly)) || u.identifier.toLowerCase() === cleanPhone.toLowerCase();
+      });
+
+      if (!existingUser) {
+        setNotice("Account not registered. Please contact your organization Administrator (9835916278) to create your account.");
+        return;
+      }
+
+      if ((existingUser.status as string) === "suspended" || (existingUser.status as string) === "removed") {
+        setNotice("This account has been deactivated or suspended by the Administrator.");
+        return;
+      }
+
+      // Log in with assigned user role
+      signInToPreview(existingUser.identifier, existingUser.role);
       router.replace("/(tabs)");
       return;
+    }
+
+    // OTP Mode
+    if (!isAdminAccount) {
+      const existingUser = data.managedUsers.find((u) => {
+        const uDigits = (u.identifier || "").replace(/[^0-9]/g, "");
+        return (uDigits && uDigits.includes(digitsOnly)) || u.identifier.toLowerCase() === cleanPhone.toLowerCase();
+      });
+
+      if (!existingUser) {
+        setNotice("Mobile number not registered. Only the Administrator can create new accounts.");
+        return;
+      }
     }
 
     try {
@@ -82,7 +125,6 @@ export default function LoginScreen() {
           return;
         } catch (nativeErr: any) {
           console.warn("[Auth] Native phone auth error:", nativeErr);
-          // If native SMS fails, provide clear notice or fallback
           setNotice(nativeErr?.message || "Failed to send SMS OTP via carrier.");
           return;
         }
@@ -104,6 +146,9 @@ export default function LoginScreen() {
     }
 
     setNotice(null);
+
+    const digitsOnly = identifier.trim().replace(/[^0-9]/g, "");
+    const isAdminAccount = digitsOnly.includes("9835916278") || identifier.toLowerCase().includes("admin");
 
     try {
       let idToken = "";
@@ -137,9 +182,12 @@ export default function LoginScreen() {
         }
       } catch (mutateErr) {
         console.warn("[Auth] Activation fallback:", mutateErr);
-        const clean = identifier.trim().replace(/[^0-9]/g, "");
-        const isUserAdmin = clean.includes("9835916278");
-        signInToPreview(identifier.trim() || "+919835916278", isUserAdmin ? "admin" : previewRole);
+        if (isAdminAccount) {
+          signInToPreview("+919835916278", "admin");
+        } else {
+          const existingUser = data.managedUsers.find((u) => u.identifier.includes(digitsOnly));
+          signInToPreview(identifier.trim(), existingUser?.role || "employee");
+        }
         router.replace("/(tabs)");
         return;
       }
@@ -147,12 +195,6 @@ export default function LoginScreen() {
       console.error("[Auth] Verification failed:", error);
       setNotice(error instanceof Error ? error.message : "Verification failed.");
     }
-  };
-
-  const openPreview = () => {
-    const previewIdentifier = identifier.trim() || "field.employee@preview.local";
-    signInToPreview(previewIdentifier, previewRole);
-    router.replace("/(tabs)");
   };
 
   return (
@@ -165,7 +207,7 @@ export default function LoginScreen() {
           <View style={styles.heroCopy}>
             <StatusChip label="Sologix Energy field operations" tone="success" />
             <Text style={styles.title}>Energizing every field shift with verified proof.</Text>
-            <Text style={styles.subtitle}>Sologix Energy Pvt Ltd uses this secure workspace for attendance, customer visits, and field activity verification.</Text>
+            <Text style={styles.subtitle}>Sologix Energy Pvt Ltd uses this secure workspace for attendance, customer visits, and field workforce management.</Text>
           </View>
         </View>
 
@@ -184,17 +226,17 @@ export default function LoginScreen() {
                 autoComplete="email"
                 keyboardType="email-address"
                 onChangeText={setIdentifier}
-                placeholder="Mobile number or work email"
+                placeholder="Mobile number (e.g. 9835916278)"
                 placeholderTextColor="#74899A"
                 style={styles.input}
                 value={identifier}
               />
               <View style={styles.modeRow}>
-                <Pressable onPress={() => setMode("otp")} style={[styles.modeButton, mode === "otp" && styles.modeButtonActive]}>
-                  <Text style={[styles.modeText, mode === "otp" && styles.modeTextActive]}>One-time code</Text>
-                </Pressable>
                 <Pressable onPress={() => setMode("password")} style={[styles.modeButton, mode === "password" && styles.modeButtonActive]}>
                   <Text style={[styles.modeText, mode === "password" && styles.modeTextActive]}>Password</Text>
+                </Pressable>
+                <Pressable onPress={() => setMode("otp")} style={[styles.modeButton, mode === "otp" && styles.modeButtonActive]}>
+                  <Text style={[styles.modeText, mode === "otp" && styles.modeTextActive]}>One-time code</Text>
                 </Pressable>
               </View>
               {mode === "password" ? (
@@ -237,8 +279,8 @@ export default function LoginScreen() {
 
           {verificationStep === "request" ? (
             <FieldButton
-              icon={mode === "otp" ? "lock-outline" : "vpn-key"}
-              label={mode === "otp" ? "Request secure code" : "Continue securely"}
+              icon={mode === "password" ? "vpn-key" : "lock-outline"}
+              label={mode === "password" ? "Continue securely" : "Request secure code"}
               onPress={requestAuthentication}
               style={styles.action}
               loading={activateMutation.isPending}
@@ -253,10 +295,7 @@ export default function LoginScreen() {
             />
           )}
 
-          <View style={styles.dividerRow}><View style={styles.divider} /><Text style={styles.dividerText}>FOR PREVIEW</Text><View style={styles.divider} /></View>
-          <View style={styles.previewRoles}>{(["employee", "manager", "admin"] as const).map((item) => <Pressable key={item} onPress={() => setPreviewRole(item)} style={[styles.previewRole, previewRole === item && styles.previewRoleActive]}><Text style={[styles.previewRoleText, previewRole === item && styles.previewRoleTextActive]}>{item === "employee" ? "Employee" : item === "manager" ? "Manager" : "Admin"}</Text></Pressable>)}</View>
-          <FieldButton icon="visibility" label="Open local preview workspace" onPress={openPreview} variant="secondary" />
-          <Text style={styles.footnote}>Sologix Energy Pvt Ltd · Energizing Naturally</Text>
+          <Text style={styles.footnote}>Sologix Energy Pvt Ltd · Authorized Personnel Only</Text>
         </View>
       </KeyboardAvoidingView>
     </ScreenContainer>
@@ -280,15 +319,7 @@ const styles = StyleSheet.create({
   modeButtonActive: { backgroundColor: "#FFFFFF", shadowColor: "#527085", shadowOpacity: 0.09, shadowOffset: { width: 0, height: 3 }, shadowRadius: 7, elevation: 2 },
   modeText: { color: "#7E96A9", fontWeight: "700", fontSize: 13 },
   modeTextActive: { color: "#17354A" },
-  notice: { color: "#A56316", fontSize: 12, lineHeight: 17, paddingHorizontal: 2 },
-  action: { marginTop: 2 },
-  dividerRow: { flexDirection: "row", alignItems: "center", gap: 10, marginVertical: 2 },
-  divider: { flex: 1, height: 1, backgroundColor: "#E1EBF0" },
-  dividerText: { color: "#7E96A9", fontWeight: "800", letterSpacing: 0.9, fontSize: 10 },
-  previewRoles: { flexDirection: "row", gap: 7 },
-  previewRole: { flex: 1, minHeight: 34, borderRadius: 11, backgroundColor: "#F4F9FA", alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: "#DDEAF0" },
-  previewRoleActive: { backgroundColor: "#13C5B8", borderColor: "#13C5B8" },
-  previewRoleText: { color: "#7E96A9", fontSize: 11, fontWeight: "800" },
-  previewRoleTextActive: { color: "#17354A" },
-  footnote: { color: "#7E96A9", fontSize: 11, lineHeight: 16, textAlign: "center", paddingHorizontal: 8 },
+  notice: { color: "#DC2626", fontSize: 13, lineHeight: 18, paddingHorizontal: 2, fontWeight: "600" },
+  action: { marginTop: 4 },
+  footnote: { color: "#7E96A9", fontSize: 11, lineHeight: 16, textAlign: "center", paddingHorizontal: 8, marginTop: 6 },
 });
