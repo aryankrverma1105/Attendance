@@ -1,0 +1,60 @@
+# Project TODO
+
+- [x] Define FieldPulse mobile UX, security baseline, and Cloud SQL integration boundary.
+- [x] Create the Android-first design system, bottom navigation, and animated dashboard.
+- [x] Add OTP/password sign-in screens and role-aware session state.
+- [x] Implement local-first data models and encrypted offline operation queue.
+- [x] Build GPS and photo-verified attendance check-in/check-out workflow.
+- [x] Build attendance history with verification, late/early, and sync status.
+- [x] Build customer directory, Android map-pin placement, customer details, and customer creation flow.
+- [x] Build today/upcoming visit planning, visit check-in/out, meeting outcome, follow-up, notes, and evidence flow.
+- [x] Build activity reports, expenses summary, notifications, and team chat interface.
+- [x] Add real GPS, camera, navigation, background location configuration, and network awareness with permission handling.
+- [ ] Add production media upload, Cloud SQL schema/API operations, secure OTP provider, notifications, and map integration after cloud service decisions and credentials are supplied.
+- [ ] Add API-side anti-abuse controls, request validation, audit logging, and rate limits after backend configuration.
+- [x] Add deterministic tests for GPS-evidence classification and route-distance calculations.
+- [x] Add deterministic tests for administrator and employee role-access boundaries.
+- [x] Generate and apply FieldPulse launcher branding assets.
+- [x] Validate core flows, Android responsiveness, offline behavior, and release readiness.
+- [x] Define admin, manager, and field employee permission boundaries and data visibility rules.
+- [x] Build role-aware administrator navigation, user directory, search, filtering, and account creation UI.
+- [x] Build a consolidated employee-detail view with profile, attendance, customer visits, route history, evidence, and activity summaries.
+- [x] Create a step-by-step production configuration guide for OTP, Cloud SQL, Cloud Storage, Firebase notifications, and restricted Google Maps keys.
+- [x] Validate administrative workflows and save an updated project checkpoint.
+- [x] Analyze the supplied FieldSense navigation reference and document the light visual direction.
+- [x] Replace the dark theme with a FieldSense-inspired light theme across navigation and key screens.
+- [x] Implement a translucent liquid-glass bottom navigation with compact icons, labels, and a clear active state.
+- [x] Restyle the employee and administrator views for visual consistency with the light design system.
+- [x] Validate the light-theme redesign and save an updated checkpoint.
+- [x] Fix the sign-out button so it clears the secure session and reliably returns to sign-in.
+- [x] Rebrand the launcher, sign-in experience, and application metadata for Sologix Energy Pvt Ltd using the supplied identity.
+- [x] Add Aryan Kumar Verma developer attribution in the product profile and project metadata.
+- [x] Validate the Sologix rebrand and save an updated checkpoint.
+- [x] Define linked user-account lifecycle rules, administrator safeguards, and audit-ready removal behavior.
+- [x] Enable administrators to create a linked user account and issue an account invitation/access state.
+- [x] Enable administrators to remove a user account through a confirmation workflow that preserves local audit context.
+- [x] Test the administrator account lifecycle and save an updated checkpoint.
+- [x] Produce an implementation guide for Firebase OTP invitation delivery and verified user activation.
+- [x] Produce an implementation guide for account suspension/reactivation and immutable Cloud SQL audit events.
+- [x] Analyze the supplied iOS-style navigation reference and document compact capsule behavior.
+- [x] Reduce the navigation width and implement an iOS-inspired liquid-glass capsule with animated selected-tab halo.
+- [x] Validate the compact liquid-glass navigation and save an updated checkpoint.
+- [x] Start route tracking automatically after sign-in when the user grants required location permissions.
+- [x] Preserve a clear paused fallback and recovery action when location permissions or services are unavailable.
+- [x] Keep the Profile sign-out action visible above the floating navigation on compact mobile screens.
+- [x] Center the compact liquid-glass navigation capsule and strengthen its elevated shadow treatment.
+- [x] Validate the Profile layout correction and save an updated checkpoint.
+- [x] Reserve a consistent bottom content boundary above the floating navigation on every tab screen.
+- [x] Move automatic route tracking from app sign-in to successful attendance check-in.
+- [x] Confirm route tracking stays paused before attendance and remains permission-aware after check-in.
+- [x] Test the corrected attendance-triggered tracking behavior and save an updated checkpoint.
+- [x] Show a visible tracking-start confirmation after attendance check-in.
+- [x] Stop active route tracking automatically at attendance check-out.
+- [x] Create manager/admin alert records when an employee denies required location tracking permission.
+- [x] Test attendance-tracking feedback and permission-alert behavior, then save an updated checkpoint.
+- [ ] Confirm Firebase project, Cloud SQL engine/region, Cloud Run service identity, and Android production registration prerequisites.
+- [ ] Validate and apply the supplied Firebase Android `google-services.json` configuration file.
+- [ ] Configure Firebase Phone Authentication, Android app verification, and Firebase Cloud Messaging.
+- [ ] Provision Cloud SQL and implement organization-scoped database schema, immutable audit events, and Cloud Run API authorization.
+- [ ] Connect Firebase ID-token activation, media storage uploads, offline sync, and manager/admin alert delivery.
+- [ ] Validate end-to-end production backend security and save a deployment-ready checkpoint.
