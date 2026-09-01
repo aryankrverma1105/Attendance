@@ -73,7 +73,7 @@ export default function LoginScreen() {
       });
 
       if (!existingUser) {
-        setNotice("Account not registered. Please contact your organization Administrator (9835916278) to create your account.");
+        setNotice("Account not registered. Please contact your organization Administrator to request access.");
         return;
       }
 
@@ -253,7 +253,7 @@ export default function LoginScreen() {
                   autoComplete="email"
                   keyboardType="email-address"
                   onChangeText={setIdentifier}
-                  placeholder="Mobile number (e.g. 9835916278)"
+                  placeholder="Registered mobile number"
                   placeholderTextColor="#74899A"
                   style={styles.input}
                   value={identifier}

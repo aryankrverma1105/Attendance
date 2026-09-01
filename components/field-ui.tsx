@@ -436,7 +436,7 @@ export function UserEditModal({
                   setIdentifier(val);
                   setError(null);
                 }}
-                placeholder="e.g. 9835916278"
+                placeholder="e.g. +91 9876543210"
                 placeholderTextColor="#94A3B8"
                 style={[styles.inputRow, { minHeight: 46, color: "#0B192C", fontSize: 14, fontWeight: "600" }]}
                 value={identifier}
