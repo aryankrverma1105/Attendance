@@ -7,7 +7,7 @@ export const firebaseWebConfig = {
   projectId: "aquasense-477908",
   storageBucket: "aquasense-477908.firebasestorage.app",
   messagingSenderId: "183614360333",
-  appId: "1:183614360333:web:de09841bb849e1ac063e44",
+  appId: "1:183614360333:web:29a24ad2ebfdfe80063e44",
 };
 
 export function getWebAuthInstance() {
