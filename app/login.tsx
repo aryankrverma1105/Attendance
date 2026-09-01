@@ -115,31 +115,24 @@ export default function LoginScreen() {
 
       if (Platform.OS !== "web") {
         try {
-          const mod = require("@react-native-firebase/auth");
-          firebaseAuthModule = typeof mod === "function" ? mod : (mod?.default || mod);
-          if (typeof firebaseAuthModule === "function") {
-            isNativeAuthAvailable = true;
+          const authModule = require("@react-native-firebase/auth");
+          const auth = authModule.default || authModule;
+          if (typeof auth === "function") {
+            const confirmation = await auth().signInWithPhoneNumber(cleanPhone);
+            setConfirmResult(confirmation);
+            setNotice(`Verification code sent to ${cleanPhone}.`);
+            setVerificationStep("verify");
+            return;
+          } else {
+            throw new Error("Firebase Native Auth not linked. Rebuild APK with EAS.");
           }
-        } catch {
-          isNativeAuthAvailable = false;
-        }
-      }
-
-      if (isNativeAuthAvailable && firebaseAuthModule) {
-        // Native real Firebase Auth in production APK
-        try {
-          const confirmation = await firebaseAuthModule().signInWithPhoneNumber(cleanPhone);
-          setConfirmResult(confirmation);
-          setNotice(`Verification code sent to ${cleanPhone}.`);
-          setVerificationStep("verify");
-          return;
         } catch (nativeErr: any) {
-          console.warn("[Auth] Native phone auth error:", nativeErr);
+          console.error("[Firebase Auth] Native SMS error:", nativeErr);
           setNotice(nativeErr?.message || "Failed to send SMS OTP via carrier.");
           return;
         }
       } else {
-        // Fallback
+        // Web preview
         setNotice(`Verification code sent to ${cleanPhone}.`);
         setVerificationStep("verify");
       }
@@ -166,12 +159,10 @@ export default function LoginScreen() {
       if (confirmResult && typeof confirmResult.confirm === "function") {
         const userCredential = await confirmResult.confirm(verificationCode);
         idToken = await userCredential.user.getIdToken();
+      } else if (Platform.OS !== "web") {
+        throw new Error("No active verification session. Please request a new SMS OTP.");
       } else {
-        if (verificationCode === "123456" || verificationCode.length === 6) {
-          idToken = `mock_token_phone_${encodeURIComponent(identifier.trim())}`;
-        } else {
-          throw new Error("Invalid verification code. Enter 123456.");
-        }
+        idToken = `mock_token_phone_${encodeURIComponent(identifier.trim())}`;
       }
 
       // Send token to backend to activate / sign-in
