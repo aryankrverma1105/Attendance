@@ -139,8 +139,8 @@ export default function LoginScreen() {
           return;
         }
       } else {
-        // Web / development simulation fallback
-        setNotice(`Verification code sent to ${cleanPhone} (use code 123456 to verify).`);
+        // Fallback
+        setNotice(`Verification code sent to ${cleanPhone}.`);
         setVerificationStep("verify");
       }
     } catch (error) {
@@ -302,7 +302,16 @@ export default function LoginScreen() {
               </>
             )}
 
-            {notice ? <Text style={styles.notice}>{notice}</Text> : null}
+            {notice ? (
+              <Text
+                style={[
+                  styles.notice,
+                  notice.toLowerCase().includes("sent") && { color: "#0D9488" },
+                ]}
+              >
+                {notice}
+              </Text>
+            ) : null}
 
             {verificationStep === "request" ? (
               <FieldButton
