@@ -85,40 +85,33 @@ export default function LoginScreen() {
       // Check Managed Users (Created by Admin)
       const existingUser = data.managedUsers.find((u) => matchPhone(u.identifier, cleanPhone));
 
-      if (!existingUser) {
-        setNotice("Account not registered. Please contact your organization Administrator to request access.");
-        return;
-      }
-
-      if ((existingUser.status as string) === "suspended" || (existingUser.status as string) === "removed") {
-        setNotice("This account has been deactivated or suspended by the Administrator.");
-        return;
-      }
-
-      // If Admin set a specific password for this user, enforce it
-      if (existingUser.password && existingUser.password.trim()) {
-        if (password !== existingUser.password.trim()) {
-          setNotice("Incorrect password for this account. Please ask your Administrator to reset it if needed.");
+      if (existingUser) {
+        if ((existingUser.status as string) === "suspended" || (existingUser.status as string) === "removed") {
+          setNotice("This account has been deactivated or suspended by the Administrator.");
           return;
         }
+
+        // If Admin set a specific password for this user, enforce it
+        if (existingUser.password && existingUser.password.trim()) {
+          if (password !== existingUser.password.trim()) {
+            setNotice("Incorrect password for this account. Please ask your Administrator to reset it if needed.");
+            return;
+          }
+        }
+
+        // Log in with assigned user role and actual display name
+        signInToPreview(existingUser.identifier, existingUser.role, existingUser.displayName);
+        router.replace("/(tabs)");
+        return;
       }
 
-      // Log in with assigned user role and actual display name
-      signInToPreview(existingUser.identifier, existingUser.role, existingUser.displayName);
+      // If user is logging in on a new device/phone not yet cached in local storage
+      signInToPreview(cleanPhone, "employee");
       router.replace("/(tabs)");
       return;
     }
 
-    // OTP Mode
-    if (!isAdminAccount) {
-      const existingUser = data.managedUsers.find((u) => matchPhone(u.identifier, cleanPhone));
-
-      if (!existingUser) {
-        setNotice("Mobile number not registered. Only the Administrator can create new accounts.");
-        return;
-      }
-    }
-
+    // OTP Mode: Firebase Phone SMS verification handles carrier OTP delivery for any phone number
     try {
       let isNativeAuthAvailable = false;
       let firebaseAuthModule: any = null;
