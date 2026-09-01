@@ -1,47 +1,61 @@
 import { initializeApp, getApps, getApp } from "firebase/app";
-import { getAuth, RecaptchaVerifier, signInWithPhoneNumber, type ConfirmationResult } from "firebase/auth";
+import {
+  getAuth,
+  RecaptchaVerifier,
+  signInWithPhoneNumber,
+  ConfirmationResult,
+} from "firebase/auth";
 
-export const firebaseWebConfig = {
+const firebaseConfig = {
   apiKey: "AIzaSyBpYt8JvAiZ5_lVolhpmpqXkPBsFAJ7y3M",
   authDomain: "aquasense-477908.firebaseapp.com",
   projectId: "aquasense-477908",
   storageBucket: "aquasense-477908.firebasestorage.app",
   messagingSenderId: "183614360333",
-  appId: "1:183614360333:web:29a24ad2ebfdfe80063e44",
+  appId: "1:183614360333:web:de09841bb849e1ac063e44",
 };
 
-export function getWebAuthInstance() {
-  const app = getApps().length > 0 ? getApp() : initializeApp(firebaseWebConfig);
+export function getWebFirebaseAuth() {
+  if (typeof window === "undefined") return null;
+  const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
   return getAuth(app);
 }
 
-export async function requestWebPhoneOtp(
-  phoneNumber: string,
-  containerId: string = "recaptcha-container"
-): Promise<ConfirmationResult> {
-  if (typeof window === "undefined" || typeof document === "undefined") {
-    throw new Error("Web phone OTP requires browser environment.");
+declare global {
+  interface Window {
+    recaptchaVerifier?: RecaptchaVerifier;
+    recaptchaWidgetId?: any;
+  }
+}
+
+export async function requestWebPhoneOtp(phoneNumber: string): Promise<ConfirmationResult> {
+  const auth = getWebFirebaseAuth();
+  if (!auth || typeof window === "undefined") {
+    throw new Error("Web Firebase Auth is only available in browser environments.");
   }
 
-  let container = document.getElementById(containerId);
+  // Ensure a DOM container exists for invisible reCAPTCHA
+  let container = document.getElementById("recaptcha-container");
   if (!container) {
     container = document.createElement("div");
-    container.id = containerId;
+    container.id = "recaptcha-container";
     document.body.appendChild(container);
   }
 
-  const auth = getWebAuthInstance();
-
-  if ((window as any).recaptchaVerifier) {
-    try {
-      (window as any).recaptchaVerifier.clear();
-    } catch {}
+  if (!window.recaptchaVerifier) {
+    window.recaptchaVerifier = new RecaptchaVerifier(auth, "recaptcha-container", {
+      size: "invisible",
+      callback: () => {
+        // reCAPTCHA solved - allow signInWithPhoneNumber
+      },
+      "expired-callback": () => {
+        if (window.recaptchaVerifier) {
+          window.recaptchaVerifier.clear();
+          window.recaptchaVerifier = undefined;
+        }
+      },
+    });
   }
 
-  const verifier = new RecaptchaVerifier(auth, containerId, {
-    size: "invisible",
-  });
-  (window as any).recaptchaVerifier = verifier;
-
-  return await signInWithPhoneNumber(auth, phoneNumber, verifier);
+  return await signInWithPhoneNumber(auth, phoneNumber, window.recaptchaVerifier);
 }

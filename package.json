@@ -60,6 +60,7 @@
     "expo-video": "~3.0.15",
     "expo-web-browser": "~15.0.10",
     "express": "^4.22.1",
+    "firebase": "^12.18.0",
     "firebase-admin": "^14.3.0",
     "jose": "6.1.0",
     "mysql2": "^3.16.0",

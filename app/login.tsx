@@ -114,27 +114,21 @@ export default function LoginScreen() {
       let firebaseAuthModule: any = null;
 
       if (Platform.OS === "web") {
-        // Real carrier SMS on Web / Localhost via Firebase Web SDK
         try {
           const { requestWebPhoneOtp } = require("@/lib/firebase-web-auth");
           const confirmation = await requestWebPhoneOtp(cleanPhone);
           setConfirmResult(confirmation);
-          setNotice(`Real SMS code sent to ${cleanPhone}. Enter the 6-digit code received on your phone.`);
+          setNotice(`Verification code sent to ${cleanPhone}.`);
           setVerificationStep("verify");
           return;
         } catch (webErr: any) {
-          console.error("[Firebase Web Auth] Error sending SMS:", webErr);
-          const rawMsg = webErr?.message || "";
-          if (rawMsg.includes("invalid-app-credential") || rawMsg.includes("400")) {
-            setNotice("Web Phone Auth requires registering a Web App in Firebase Console. Use Password mode to sign in on PC, or test SMS in the Android APK.");
-          } else {
-            setNotice(rawMsg || "Failed to send SMS OTP. Ensure Phone Auth is enabled in Firebase Console.");
-          }
+          console.error("[Firebase Web Auth] Error:", webErr);
+          setNotice(webErr?.message || "Failed to send SMS code. Ensure Phone Auth is enabled in Firebase Console.");
           return;
         }
       }
 
-      // Native Real Firebase SMS in production APK
+      // Native Android / iOS
       try {
         const rnfbAuth = require("@react-native-firebase/auth");
         let confirmation: any = null;
