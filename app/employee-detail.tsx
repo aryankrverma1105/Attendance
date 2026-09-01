@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Alert, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, Image, Linking, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import MaterialIcons from "@expo/vector-icons/MaterialIcons";
 
@@ -30,11 +30,34 @@ const lifecycleCopy = {
   "account-removed": "Account removed",
 } as const;
 
+const openCoordinateMap = (latitude?: number, longitude?: number, label?: string) => {
+  if (latitude === undefined || longitude === undefined) {
+    Alert.alert("Location Unavailable", "GPS coordinates are not available for this record.");
+    return;
+  }
+  const url = Platform.select({
+    ios: `maps://app?q=${encodeURIComponent(label || "Attendance Location")}&ll=${latitude},${longitude}`,
+    android: `geo:${latitude},${longitude}?q=${latitude},${longitude}(${encodeURIComponent(label || "Attendance Location")})`,
+    default: `https://www.google.com/maps/search/?api=1&query=${latitude},${longitude}`,
+  });
+  Linking.openURL(url!).catch(() => {
+    Linking.openURL(`https://www.google.com/maps/search/?api=1&query=${latitude},${longitude}`);
+  });
+};
+
 export default function EmployeeDetailScreen() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id: string }>();
   const { data, issueManagedUserAccess, removeManagedUser, updateEmployeeWage } = useFieldData();
   const [showWageModal, setShowWageModal] = useState(false);
+  const [selectedPhoto, setSelectedPhoto] = useState<{
+    uri: string;
+    title: string;
+    time?: string;
+    lat?: number;
+    lng?: number;
+    accuracy?: number | null;
+  } | null>(null);
 
   const user = data.managedUsers.find((item) => item.id === id);
   const isCurrentWorkspaceUser = data.session?.id === id;
@@ -316,7 +339,19 @@ export default function EmployeeDetailScreen() {
         </View>
 
         {/* Attendance Records */}
-        <SectionHeading title="Attendance Records" />
+        <SectionHeading
+          action={
+            <Pressable
+              onPress={() => router.push({ pathname: "/location-history", params: { employeeId: user.id } })}
+              style={styles.historyActionBtn}
+            >
+              <MaterialIcons color="#D97706" name="map" size={14} />
+              <Text style={styles.historyActionText}>Full Route</Text>
+            </Pressable>
+          }
+          subtitle="Sign-in / sign-out selfies and verified GPS locations"
+          title="Attendance & Selfies"
+        />
         {attendance.length > 0 ? (
           <View style={styles.list}>
             {attendance.map((record) => (
@@ -325,7 +360,7 @@ export default function EmployeeDetailScreen() {
                   <View>
                     <Text style={styles.recordDate}>{formatDay(record.checkInAt)}</Text>
                     <Text style={styles.recordTime}>
-                      {formatTime(record.checkInAt)} → {formatTime(record.checkOutAt)}
+                      {formatTime(record.checkInAt)} {record.checkOutAt ? `→ ${formatTime(record.checkOutAt)}` : "· Currently on shift"}
                     </Text>
                   </View>
                   <StatusChip
@@ -333,14 +368,137 @@ export default function EmployeeDetailScreen() {
                     tone={record.status === "verified" ? "success" : "warning"}
                   />
                 </View>
-                <Text style={styles.recordMeta}>
-                  Accuracy:{" "}
-                  {record.checkInLocation?.accuracy !== null &&
-                  record.checkInLocation?.accuracy !== undefined
-                    ? `±${Math.round(record.checkInLocation.accuracy)} m`
-                    : "Standard"}{" "}
-                  · {record.checkInPhotoUri ? "Photo evidence captured" : "No photo"}
-                </Text>
+
+                {/* Check-In / Sign-In Block */}
+                <View style={styles.evidenceSection}>
+                  <Text style={styles.evidenceSectionLabel}>SIGN-IN (CHECK-IN)</Text>
+                  <View style={styles.evidenceRow}>
+                    {record.checkInPhotoUri ? (
+                      <Pressable
+                        onPress={() =>
+                          setSelectedPhoto({
+                            uri: record.checkInPhotoUri!,
+                            title: `Sign-In Selfie · ${user.displayName}`,
+                            time: formatTime(record.checkInAt),
+                            lat: record.checkInLocation?.latitude,
+                            lng: record.checkInLocation?.longitude,
+                            accuracy: record.checkInLocation?.accuracy,
+                          })
+                        }
+                        style={styles.photoThumbWrap}
+                      >
+                        <Image source={{ uri: record.checkInPhotoUri }} style={styles.photoThumb} />
+                        <View style={styles.zoomBadge}>
+                          <MaterialIcons color="#FFFFFF" name="zoom-in" size={14} />
+                        </View>
+                      </Pressable>
+                    ) : (
+                      <View style={styles.photoFallback}>
+                        <MaterialIcons color="#94A3B8" name="no-photography" size={20} />
+                      </View>
+                    )}
+
+                    <View style={styles.evidenceInfo}>
+                      <View style={styles.evidenceTimeRow}>
+                        <MaterialIcons color="#10B981" name="login" size={14} />
+                        <Text style={styles.evidenceTimeText}>{formatTime(record.checkInAt)}</Text>
+                      </View>
+                      <Text style={styles.evidenceCoords}>
+                        {record.checkInLocation
+                          ? `📍 ${record.checkInLocation.latitude.toFixed(5)}, ${record.checkInLocation.longitude.toFixed(5)}`
+                          : "GPS coordinates logged"}
+                      </Text>
+                      <Text style={styles.evidenceAccuracy}>
+                        Accuracy: {record.checkInLocation?.accuracy !== null && record.checkInLocation?.accuracy !== undefined ? `±${Math.round(record.checkInLocation.accuracy)} m` : "Standard"}
+                      </Text>
+
+                      {record.checkInLocation ? (
+                        <Pressable
+                          onPress={() =>
+                            openCoordinateMap(
+                              record.checkInLocation?.latitude,
+                              record.checkInLocation?.longitude,
+                              `${user.displayName} - Sign In`
+                            )
+                          }
+                          style={styles.mapBtn}
+                        >
+                          <MaterialIcons color="#2563EB" name="map" size={13} />
+                          <Text style={styles.mapBtnText}>View on Map</Text>
+                        </Pressable>
+                      ) : null}
+                    </View>
+                  </View>
+                </View>
+
+                {/* Check-Out / Sign-Out Block */}
+                <View style={[styles.evidenceSection, { borderTopWidth: 1, borderTopColor: "#F1F5F9", paddingTop: 10 }]}>
+                  <Text style={styles.evidenceSectionLabel}>SIGN-OUT (CHECK-OUT)</Text>
+                  {record.checkOutAt ? (
+                    <View style={styles.evidenceRow}>
+                      {record.checkOutPhotoUri ? (
+                        <Pressable
+                          onPress={() =>
+                            setSelectedPhoto({
+                              uri: record.checkOutPhotoUri!,
+                              title: `Sign-Out Selfie · ${user.displayName}`,
+                              time: formatTime(record.checkOutAt),
+                              lat: record.checkOutLocation?.latitude,
+                              lng: record.checkOutLocation?.longitude,
+                              accuracy: record.checkOutLocation?.accuracy,
+                            })
+                          }
+                          style={styles.photoThumbWrap}
+                        >
+                          <Image source={{ uri: record.checkOutPhotoUri }} style={styles.photoThumb} />
+                          <View style={styles.zoomBadge}>
+                            <MaterialIcons color="#FFFFFF" name="zoom-in" size={14} />
+                          </View>
+                        </Pressable>
+                      ) : (
+                        <View style={styles.photoFallback}>
+                          <MaterialIcons color="#94A3B8" name="no-photography" size={20} />
+                        </View>
+                      )}
+
+                      <View style={styles.evidenceInfo}>
+                        <View style={styles.evidenceTimeRow}>
+                          <MaterialIcons color="#DC2626" name="logout" size={14} />
+                          <Text style={styles.evidenceTimeText}>{formatTime(record.checkOutAt)}</Text>
+                        </View>
+                        <Text style={styles.evidenceCoords}>
+                          {record.checkOutLocation
+                            ? `📍 ${record.checkOutLocation.latitude.toFixed(5)}, ${record.checkOutLocation.longitude.toFixed(5)}`
+                            : "GPS coordinates logged"}
+                        </Text>
+                        <Text style={styles.evidenceAccuracy}>
+                          Accuracy: {record.checkOutLocation?.accuracy !== null && record.checkOutLocation?.accuracy !== undefined ? `±${Math.round(record.checkOutLocation.accuracy)} m` : "Standard"}
+                        </Text>
+
+                        {record.checkOutLocation ? (
+                          <Pressable
+                            onPress={() =>
+                              openCoordinateMap(
+                                record.checkOutLocation?.latitude,
+                                record.checkOutLocation?.longitude,
+                                `${user.displayName} - Sign Out`
+                              )
+                            }
+                            style={styles.mapBtn}
+                          >
+                            <MaterialIcons color="#2563EB" name="map" size={13} />
+                            <Text style={styles.mapBtnText}>View on Map</Text>
+                          </Pressable>
+                        ) : null}
+                      </View>
+                    </View>
+                  ) : (
+                    <View style={styles.activeShiftBanner}>
+                      <MaterialIcons color="#D97706" name="pending" size={16} />
+                      <Text style={styles.activeShiftText}>Employee is currently active on shift (not signed out yet)</Text>
+                    </View>
+                  )}
+                </View>
               </Surface>
             ))}
           </View>
@@ -349,7 +507,7 @@ export default function EmployeeDetailScreen() {
             <MaterialIcons color="#F59E0B" name="event-busy" size={28} />
             <Text style={styles.emptyTitle}>No attendance records found.</Text>
             <Text style={styles.emptyBody}>
-              Verified field check-ins will automatically log here.
+              Verified field check-ins and selfies will automatically log here.
             </Text>
           </Surface>
         )}
@@ -466,6 +624,60 @@ export default function EmployeeDetailScreen() {
             visible={showWageModal}
           />
         ) : null}
+
+        {/* Full-Screen Selfie Viewer Modal */}
+        <Modal
+          animationType="fade"
+          onRequestClose={() => setSelectedPhoto(null)}
+          transparent
+          visible={Boolean(selectedPhoto)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalContent}>
+              <View style={styles.modalHeader}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.modalTitle}>{selectedPhoto?.title}</Text>
+                  {selectedPhoto?.time ? (
+                    <Text style={styles.modalTime}>{selectedPhoto.time}</Text>
+                  ) : null}
+                </View>
+                <Pressable onPress={() => setSelectedPhoto(null)} style={styles.modalCloseBtn}>
+                  <MaterialIcons color="#F8FAFC" name="close" size={22} />
+                </Pressable>
+              </View>
+
+              {selectedPhoto?.uri ? (
+                <Image
+                  resizeMode="contain"
+                  source={{ uri: selectedPhoto.uri }}
+                  style={styles.modalImage}
+                />
+              ) : null}
+
+              {selectedPhoto?.lat && selectedPhoto?.lng ? (
+                <View style={styles.modalFooter}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.modalCoords}>
+                      📍 {selectedPhoto.lat.toFixed(6)}, {selectedPhoto.lng.toFixed(6)}
+                    </Text>
+                    <Text style={styles.modalAccuracy}>
+                      Accuracy: {selectedPhoto.accuracy ? `±${Math.round(selectedPhoto.accuracy)} m` : "Verified"}
+                    </Text>
+                  </View>
+                  <Pressable
+                    onPress={() =>
+                      openCoordinateMap(selectedPhoto.lat, selectedPhoto.lng, selectedPhoto.title)
+                    }
+                    style={styles.modalMapBtn}
+                  >
+                    <MaterialIcons color="#FFFFFF" name="directions" size={16} />
+                    <Text style={styles.modalMapBtnText}>Open in Maps</Text>
+                  </Pressable>
+                </View>
+              ) : null}
+            </View>
+          </View>
+        </Modal>
       </ScrollView>
     </ScreenContainer>
   );
@@ -589,11 +801,129 @@ const styles = StyleSheet.create({
   metricValue: { color: "#0B192C", fontSize: 19, fontWeight: "900", marginTop: 2 },
   metricLabel: { color: "#64748B", fontSize: 10, lineHeight: 14 },
   list: { gap: 9 },
-  recordCard: { gap: 8 },
+  recordCard: { gap: 12, padding: 16 },
   recordTop: { flexDirection: "row", justifyContent: "space-between", gap: 9 },
   recordDate: { color: "#0B192C", fontSize: 14, fontWeight: "800" },
   recordTime: { color: "#64748B", fontSize: 11, marginTop: 2 },
   recordMeta: { color: "#64748B", fontSize: 12, lineHeight: 17 },
+  evidenceSection: { gap: 8, paddingTop: 4 },
+  evidenceSectionLabel: { color: "#D97706", fontSize: 9, letterSpacing: 1, fontWeight: "900" },
+  evidenceRow: { flexDirection: "row", gap: 12, alignItems: "center" },
+  photoThumbWrap: {
+    width: 64,
+    height: 64,
+    borderRadius: 16,
+    overflow: "hidden",
+    backgroundColor: "#F1F5F9",
+    borderWidth: 1.5,
+    borderColor: "#E2E8F0",
+    position: "relative",
+  },
+  photoThumb: { width: "100%", height: "100%" },
+  zoomBadge: {
+    position: "absolute",
+    bottom: 2,
+    right: 2,
+    backgroundColor: "rgba(15, 23, 42, 0.75)",
+    borderRadius: 8,
+    width: 18,
+    height: 18,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  photoFallback: {
+    width: 64,
+    height: 64,
+    borderRadius: 16,
+    backgroundColor: "#F8FAFC",
+    borderWidth: 1,
+    borderColor: "#E2E8F0",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  evidenceInfo: { flex: 1, gap: 3 },
+  evidenceTimeRow: { flexDirection: "row", alignItems: "center", gap: 5 },
+  evidenceTimeText: { color: "#0B192C", fontSize: 13, fontWeight: "800" },
+  evidenceCoords: { color: "#334155", fontSize: 11, fontWeight: "600" },
+  evidenceAccuracy: { color: "#64748B", fontSize: 10 },
+  mapBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: "#EFF6FF",
+    borderWidth: 1,
+    borderColor: "#BFDBFE",
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+    alignSelf: "flex-start",
+    marginTop: 2,
+  },
+  mapBtnText: { color: "#2563EB", fontSize: 11, fontWeight: "800" },
+  activeShiftBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: "#FEF3C7",
+    padding: 8,
+    borderRadius: 10,
+  },
+  activeShiftText: { color: "#92400E", fontSize: 11, fontWeight: "600", flex: 1 },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(15, 23, 42, 0.9)",
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 16,
+  },
+  modalContent: {
+    width: "100%",
+    maxWidth: 420,
+    backgroundColor: "#0F172A",
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.15)",
+    overflow: "hidden",
+  },
+  modalHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(255, 255, 255, 0.1)",
+  },
+  modalTitle: { color: "#FFFFFF", fontSize: 15, fontWeight: "800" },
+  modalTime: { color: "#94A3B8", fontSize: 12, marginTop: 2 },
+  modalCloseBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: "rgba(255, 255, 255, 0.1)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  modalImage: { width: "100%", height: 320, backgroundColor: "#000000" },
+  modalFooter: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: 16,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255, 255, 255, 0.1)",
+  },
+  modalCoords: { color: "#F8FAFC", fontSize: 12, fontWeight: "700" },
+  modalAccuracy: { color: "#94A3B8", fontSize: 11, marginTop: 1 },
+  modalMapBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: "#2563EB",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 12,
+  },
+  modalMapBtnText: { color: "#FFFFFF", fontSize: 12, fontWeight: "800" },
   visitCard: { flexDirection: "row", alignItems: "center", gap: 10 },
   visitTitle: { color: "#0B192C", fontSize: 14, fontWeight: "800" },
   visitMeta: { color: "#64748B", fontSize: 11, lineHeight: 16, marginTop: 2 },
