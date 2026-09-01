@@ -35,6 +35,8 @@ export default function LoginScreen() {
   const [verificationStep, setVerificationStep] = useState<"request" | "verify">("request");
   const [verificationCode, setVerificationCode] = useState("");
   const [confirmResult, setConfirmResult] = useState<any>(null);
+  const [isRequesting, setIsRequesting] = useState(false);
+  const [isVerifying, setIsVerifying] = useState(false);
 
   const activateMutation = trpc.auth.activate.useMutation();
 
@@ -55,6 +57,7 @@ export default function LoginScreen() {
     }
     
     setNotice(null);
+    setIsRequesting(true);
 
     const digitsOnly = cleanPhone.replace(/[^0-9]/g, "");
     const isAdminAccount = digitsOnly.includes("9835916278") || cleanPhone.toLowerCase().includes("admin");
@@ -173,6 +176,8 @@ export default function LoginScreen() {
     } catch (error) {
       console.error("[Auth] Failed to request OTP:", error);
       setNotice(error instanceof Error ? error.message : "Failed to send verification code.");
+    } finally {
+      setIsRequesting(false);
     }
   };
 
@@ -183,6 +188,7 @@ export default function LoginScreen() {
     }
 
     setNotice(null);
+    setIsVerifying(true);
 
     const digitsOnly = identifier.trim().replace(/[^0-9]/g, "");
     const isAdminAccount = digitsOnly.includes("9835916278") || identifier.toLowerCase().includes("admin");
@@ -227,6 +233,8 @@ export default function LoginScreen() {
     } catch (error) {
       console.error("[Auth] Verification failed:", error);
       setNotice(error instanceof Error ? error.message : "Verification failed.");
+    } finally {
+      setIsVerifying(false);
     }
   };
 
@@ -339,7 +347,7 @@ export default function LoginScreen() {
                 label={mode === "password" ? "Continue securely" : "Request secure code"}
                 onPress={requestAuthentication}
                 style={styles.action}
-                loading={activateMutation.isPending}
+                loading={isRequesting || activateMutation.isPending}
               />
             ) : (
               <FieldButton
@@ -347,7 +355,7 @@ export default function LoginScreen() {
                 label="Verify secure code"
                 onPress={confirmCode}
                 style={styles.action}
-                loading={activateMutation.isPending}
+                loading={isVerifying || activateMutation.isPending}
               />
             )}
 
