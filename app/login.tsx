@@ -82,6 +82,14 @@ export default function LoginScreen() {
         return;
       }
 
+      // If Admin set a specific password for this user, enforce it
+      if (existingUser.password && existingUser.password.trim()) {
+        if (password !== existingUser.password.trim()) {
+          setNotice("Incorrect password for this account. Please ask your Administrator to reset it if needed.");
+          return;
+        }
+      }
+
       // Log in with assigned user role and actual display name
       signInToPreview(existingUser.identifier, existingUser.role, existingUser.displayName);
       router.replace("/(tabs)");

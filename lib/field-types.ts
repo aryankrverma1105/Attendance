@@ -18,6 +18,7 @@ export type ManagedUser = {
   identifier: string;
   role: FieldRole;
   status: "active" | "invited" | "suspended";
+  password?: string;
   department?: string;
   dailyWage: number;
   managerId?: string;

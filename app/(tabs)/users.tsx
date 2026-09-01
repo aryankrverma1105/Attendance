@@ -40,12 +40,13 @@ export default function AdminUsersScreen() {
   const [showCreate, setShowCreate] = useState(false);
   const [name, setName] = useState("");
   const [identifier, setIdentifier] = useState("");
+  const [password, setPassword] = useState("");
   const [department, setDepartment] = useState("");
   const [initialWage, setInitialWage] = useState("");
   const [selectedManagerId, setSelectedManagerId] = useState<string>("");
   const [role, setRole] = useState<FieldRole>("employee");
 
-  // Wage modal state
+  // User edit modal state
   const [editingUser, setEditingUser] = useState<ManagedUser | null>(null);
 
   const actorRole = data.session?.role;
@@ -108,6 +109,7 @@ export default function AdminUsersScreen() {
     createManagedUser({
       displayName: name.trim(),
       identifier: cleanPhone,
+      password: password.trim() || undefined,
       role,
       department: department.trim() || undefined,
       dailyWage: validatedWage,
@@ -129,6 +131,7 @@ export default function AdminUsersScreen() {
 
     setName("");
     setIdentifier("");
+    setPassword("");
     setDepartment("");
     setInitialWage("");
     setSelectedManagerId("");
@@ -266,6 +269,16 @@ export default function AdminUsersScreen() {
               placeholderTextColor="#94A3B8"
               style={styles.input}
               value={identifier}
+            />
+
+            <TextInput
+              autoCapitalize="none"
+              onChangeText={setPassword}
+              placeholder="Initial Login Password (optional)"
+              placeholderTextColor="#94A3B8"
+              secureTextEntry
+              style={styles.input}
+              value={password}
             />
 
             <TextInput

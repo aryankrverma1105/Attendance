@@ -299,6 +299,7 @@ export type UserEditFormInput = {
   displayName: string;
   identifier: string;
   role: "admin" | "manager" | "employee";
+  password?: string;
   department?: string;
   dailyWage?: number;
   managerId?: string;
@@ -321,6 +322,7 @@ export function UserEditModal({
     displayName: string;
     identifier: string;
     role: "admin" | "manager" | "employee";
+    password?: string;
     department?: string;
     dailyWage?: number;
     managerId?: string;
@@ -332,6 +334,8 @@ export function UserEditModal({
 }) {
   const [name, setName] = useState("");
   const [identifier, setIdentifier] = useState("");
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [role, setRole] = useState<"admin" | "manager" | "employee">("employee");
   const [department, setDepartment] = useState("");
   const [wageText, setWageText] = useState("");
@@ -343,6 +347,7 @@ export function UserEditModal({
     if (user) {
       setName(user.displayName || "");
       setIdentifier(user.identifier || "");
+      setPassword(user.password || "");
       setRole(user.role || "employee");
       setDepartment(user.department || "");
       setWageText(user.dailyWage ? String(user.dailyWage) : "");
@@ -382,6 +387,7 @@ export function UserEditModal({
       displayName: name.trim(),
       identifier: identifier.trim(),
       role,
+      password: password.trim() || undefined,
       department: department.trim() || undefined,
       dailyWage: role === "employee" ? Math.round(parsedWage) : 0,
       managerId: role === "employee" && selectedManagerId ? selectedManagerId : undefined,
@@ -435,6 +441,27 @@ export function UserEditModal({
                 style={[styles.inputRow, { minHeight: 46, color: "#0B192C", fontSize: 14, fontWeight: "600" }]}
                 value={identifier}
               />
+
+              {/* Password */}
+              <Text style={styles.inputLabel}>SET / CHANGE PASSWORD</Text>
+              <View style={[styles.inputRow, { justifyContent: "space-between" }]}>
+                <TextInput
+                  autoCapitalize="none"
+                  onChangeText={setPassword}
+                  placeholder="Enter login password"
+                  placeholderTextColor="#94A3B8"
+                  secureTextEntry={!showPassword}
+                  style={{ flex: 1, minHeight: 46, color: "#0B192C", fontSize: 14, fontWeight: "600" }}
+                  value={password}
+                />
+                <Pressable onPress={() => setShowPassword(!showPassword)} style={{ padding: 6 }}>
+                  <MaterialIcons
+                    color="#64748B"
+                    name={showPassword ? "visibility-off" : "visibility"}
+                    size={20}
+                  />
+                </Pressable>
+              </View>
 
               {/* Role */}
               <Text style={styles.inputLabel}>ORGANIZATION ROLE</Text>
