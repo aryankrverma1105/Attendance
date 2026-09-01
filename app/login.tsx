@@ -11,6 +11,19 @@ import { useFieldData } from "@/lib/field-data";
 import { trpc } from "@/lib/trpc";
 import type { FieldRole } from "@/lib/field-types";
 
+function matchPhone(a?: string, b?: string): boolean {
+  if (!a || !b) return false;
+  const sa = a.trim().toLowerCase();
+  const sb = b.trim().toLowerCase();
+  if (sa === sb) return true;
+  const da = sa.replace(/[^0-9]/g, "");
+  const db = sb.replace(/[^0-9]/g, "");
+  if (!da || !db) return false;
+  const ka = da.length >= 10 ? da.slice(-10) : da;
+  const kb = db.length >= 10 ? db.slice(-10) : db;
+  return ka === kb;
+}
+
 export default function LoginScreen() {
   const router = useRouter();
   const { data, signInToPreview } = useFieldData();
@@ -67,10 +80,7 @@ export default function LoginScreen() {
       }
 
       // Check Managed Users (Created by Admin)
-      const existingUser = data.managedUsers.find((u) => {
-        const uDigits = (u.identifier || "").replace(/[^0-9]/g, "");
-        return (digitsOnly && uDigits.endsWith(digitsOnly)) || u.identifier.toLowerCase() === cleanPhone.toLowerCase();
-      });
+      const existingUser = data.managedUsers.find((u) => matchPhone(u.identifier, cleanPhone));
 
       if (!existingUser) {
         setNotice("Account not registered. Please contact your organization Administrator to request access.");
@@ -98,10 +108,7 @@ export default function LoginScreen() {
 
     // OTP Mode
     if (!isAdminAccount) {
-      const existingUser = data.managedUsers.find((u) => {
-        const uDigits = (u.identifier || "").replace(/[^0-9]/g, "");
-        return (digitsOnly && uDigits.endsWith(digitsOnly)) || u.identifier.toLowerCase() === cleanPhone.toLowerCase();
-      });
+      const existingUser = data.managedUsers.find((u) => matchPhone(u.identifier, cleanPhone));
 
       if (!existingUser) {
         setNotice("Mobile number not registered. Only the Administrator can create new accounts.");
@@ -211,10 +218,7 @@ export default function LoginScreen() {
         if (isAdminAccount) {
           signInToPreview("+919835916278", "admin", "Aryan Kumar Verma");
         } else {
-          const existingUser = data.managedUsers.find((u) => {
-            const uDigits = (u.identifier || "").replace(/[^0-9]/g, "");
-            return (digitsOnly && uDigits.endsWith(digitsOnly)) || u.identifier.toLowerCase() === identifier.trim().toLowerCase();
-          });
+          const existingUser = data.managedUsers.find((u) => matchPhone(u.identifier, identifier));
           signInToPreview(existingUser ? existingUser.identifier : identifier.trim(), existingUser?.role || "employee", existingUser?.displayName);
         }
         router.replace("/(tabs)");

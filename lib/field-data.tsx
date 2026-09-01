@@ -294,7 +294,7 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
       dailyWage: input.dailyWage ?? 0,
       id: createId("member"),
       accountLinkId,
-      status: "invited",
+      status: "active",
       createdAt,
     };
     const event: AccountLifecycleEvent = {
