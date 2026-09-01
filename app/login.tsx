@@ -113,40 +113,51 @@ export default function LoginScreen() {
       let isNativeAuthAvailable = false;
       let firebaseAuthModule: any = null;
 
-      if (Platform.OS !== "web") {
+      if (Platform.OS === "web") {
+        // Real carrier SMS on Web / Localhost via Firebase Web SDK
         try {
-          const rnfbAuth = require("@react-native-firebase/auth");
-          let confirmation: any = null;
-
-          if (typeof rnfbAuth.getAuth === "function" && typeof rnfbAuth.signInWithPhoneNumber === "function") {
-            const auth = rnfbAuth.getAuth();
-            confirmation = await rnfbAuth.signInWithPhoneNumber(auth, cleanPhone);
-          } else {
-            const authFn = typeof rnfbAuth === "function" ? rnfbAuth : (rnfbAuth.default || rnfbAuth);
-            if (typeof authFn === "function") {
-              confirmation = await authFn().signInWithPhoneNumber(cleanPhone);
-            } else if (authFn && typeof authFn.signInWithPhoneNumber === "function") {
-              confirmation = await authFn.signInWithPhoneNumber(cleanPhone);
-            }
-          }
-
-          if (confirmation) {
-            setConfirmResult(confirmation);
-            setNotice(`Verification code sent to ${cleanPhone}.`);
-            setVerificationStep("verify");
-            return;
-          } else {
-            throw new Error("Could not initialize Firebase Phone Auth session.");
-          }
-        } catch (nativeErr: any) {
-          console.error("[Firebase Auth] Native SMS error:", nativeErr);
-          setNotice(nativeErr?.message || "Failed to send SMS OTP via carrier.");
+          const { requestWebPhoneOtp } = require("@/lib/firebase-web-auth");
+          const confirmation = await requestWebPhoneOtp(cleanPhone);
+          setConfirmResult(confirmation);
+          setNotice(`Real SMS code sent to ${cleanPhone}. Enter the 6-digit code received on your phone.`);
+          setVerificationStep("verify");
+          return;
+        } catch (webErr: any) {
+          console.error("[Firebase Web Auth] Error sending SMS:", webErr);
+          setNotice(webErr?.message || "Failed to send SMS OTP. Ensure Phone Auth is enabled in Firebase Console.");
           return;
         }
-      } else {
-        // Web preview
-        setNotice(`Verification code sent to ${cleanPhone}.`);
-        setVerificationStep("verify");
+      }
+
+      // Native Real Firebase SMS in production APK
+      try {
+        const rnfbAuth = require("@react-native-firebase/auth");
+        let confirmation: any = null;
+
+        if (typeof rnfbAuth.getAuth === "function" && typeof rnfbAuth.signInWithPhoneNumber === "function") {
+          const auth = rnfbAuth.getAuth();
+          confirmation = await rnfbAuth.signInWithPhoneNumber(auth, cleanPhone);
+        } else {
+          const authFn = typeof rnfbAuth === "function" ? rnfbAuth : (rnfbAuth.default || rnfbAuth);
+          if (typeof authFn === "function") {
+            confirmation = await authFn().signInWithPhoneNumber(cleanPhone);
+          } else if (authFn && typeof authFn.signInWithPhoneNumber === "function") {
+            confirmation = await authFn.signInWithPhoneNumber(cleanPhone);
+          }
+        }
+
+        if (confirmation) {
+          setConfirmResult(confirmation);
+          setNotice(`Verification code sent to ${cleanPhone}.`);
+          setVerificationStep("verify");
+          return;
+        } else {
+          throw new Error("Could not initialize Firebase Phone Auth session.");
+        }
+      } catch (nativeErr: any) {
+        console.error("[Firebase Auth] Native SMS error:", nativeErr);
+        setNotice(nativeErr?.message || "Failed to send SMS OTP via carrier.");
+        return;
       }
     } catch (error) {
       console.error("[Auth] Failed to request OTP:", error);
@@ -171,10 +182,8 @@ export default function LoginScreen() {
       if (confirmResult && typeof confirmResult.confirm === "function") {
         const userCredential = await confirmResult.confirm(verificationCode);
         idToken = await userCredential.user.getIdToken();
-      } else if (Platform.OS !== "web") {
-        throw new Error("No active verification session. Please request a new SMS OTP.");
       } else {
-        idToken = `mock_token_phone_${encodeURIComponent(identifier.trim())}`;
+        throw new Error("No active verification session. Please request a new SMS OTP.");
       }
 
       // Send token to backend to activate / sign-in
