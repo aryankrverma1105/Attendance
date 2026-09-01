@@ -115,16 +115,28 @@ export default function LoginScreen() {
 
       if (Platform.OS !== "web") {
         try {
-          const authModule = require("@react-native-firebase/auth");
-          const auth = authModule.default || authModule;
-          if (typeof auth === "function") {
-            const confirmation = await auth().signInWithPhoneNumber(cleanPhone);
+          const rnfbAuth = require("@react-native-firebase/auth");
+          let confirmation: any = null;
+
+          if (typeof rnfbAuth.getAuth === "function" && typeof rnfbAuth.signInWithPhoneNumber === "function") {
+            const auth = rnfbAuth.getAuth();
+            confirmation = await rnfbAuth.signInWithPhoneNumber(auth, cleanPhone);
+          } else {
+            const authFn = typeof rnfbAuth === "function" ? rnfbAuth : (rnfbAuth.default || rnfbAuth);
+            if (typeof authFn === "function") {
+              confirmation = await authFn().signInWithPhoneNumber(cleanPhone);
+            } else if (authFn && typeof authFn.signInWithPhoneNumber === "function") {
+              confirmation = await authFn.signInWithPhoneNumber(cleanPhone);
+            }
+          }
+
+          if (confirmation) {
             setConfirmResult(confirmation);
             setNotice(`Verification code sent to ${cleanPhone}.`);
             setVerificationStep("verify");
             return;
           } else {
-            throw new Error("Firebase Native Auth not linked. Rebuild APK with EAS.");
+            throw new Error("Could not initialize Firebase Phone Auth session.");
           }
         } catch (nativeErr: any) {
           console.error("[Firebase Auth] Native SMS error:", nativeErr);
