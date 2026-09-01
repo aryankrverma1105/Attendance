@@ -59,11 +59,16 @@ export default function EmployeeDetailScreen() {
     : false;
 
   const isAdmin = canAdminManageAccount(actorRole);
-  const canDelete = canRemoveManagedAccount({
-    role: actorRole,
-    actorId,
-    targetUserId: id,
-  });
+  const canDelete = user
+    ? canRemoveManagedAccount({
+        role: actorRole,
+        actorId,
+        actorIdentifier: data.session?.identifier,
+        targetUserId: id,
+        targetUserRole: user.role,
+        targetUserIdentifier: user.identifier,
+      })
+    : false;
 
   const now = new Date();
   const currentMonth = now.getMonth() + 1;

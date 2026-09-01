@@ -22,6 +22,7 @@ import {
   useFieldData,
 } from "@/lib/field-data";
 import { hasPermission } from "@/lib/field-access";
+import { canRemoveManagedAccount, isSuperAdmin } from "@/lib/account-lifecycle";
 import type { FieldRole, ManagedUser } from "@/lib/field-types";
 import { trpc } from "@/lib/trpc";
 
@@ -140,13 +141,29 @@ export default function AdminUsersScreen() {
   };
 
   const handleStatusToggle = (targetUser: ManagedUser, nextStatus: "active" | "suspended") => {
+    if (targetUser.role === "admin" && !isSuperAdmin(data.session?.identifier)) {
+      Alert.alert(
+        "Permission Denied",
+        "Only the Primary Super Administrator (9835916278) can modify or suspend Administrator accounts."
+      );
+      return;
+    }
+
+    if (isSuperAdmin(targetUser.identifier)) {
+      Alert.alert(
+        "Action Not Allowed",
+        "The Primary Super Administrator account cannot be suspended or deactivated."
+      );
+      return;
+    }
+
     const actionLabel = nextStatus === "suspended" ? "Suspend" : "Reactivate";
     const message = `Are you sure you want to ${actionLabel.toLowerCase()} ${targetUser.displayName}?`;
 
     if (Platform.OS === "web") {
       const confirmed = typeof window !== "undefined" ? window.confirm(message) : true;
       if (confirmed) {
-        targetUser.status = nextStatus;
+        updateManagedUser(targetUser.id, { status: nextStatus });
         setEditingUser(null);
       }
       return;
@@ -158,7 +175,7 @@ export default function AdminUsersScreen() {
         text: actionLabel,
         style: nextStatus === "suspended" ? "destructive" : "default",
         onPress: () => {
-          targetUser.status = nextStatus;
+          updateManagedUser(targetUser.id, { status: nextStatus });
           setEditingUser(null);
         },
       },
@@ -166,6 +183,22 @@ export default function AdminUsersScreen() {
   };
 
   const handleSoftDelete = (targetUser: ManagedUser) => {
+    if (targetUser.role === "admin" && !isSuperAdmin(data.session?.identifier)) {
+      Alert.alert(
+        "Permission Denied",
+        "Only the Primary Super Administrator (9835916278) can deactivate or remove Administrator accounts."
+      );
+      return;
+    }
+
+    if (isSuperAdmin(targetUser.identifier)) {
+      Alert.alert(
+        "Action Not Allowed",
+        "The Primary Super Administrator account cannot be deactivated or removed."
+      );
+      return;
+    }
+
     const message = `Deactivate ${targetUser.displayName}'s account? Historical attendance, GPS, and visit audit trails will be preserved.`;
 
     if (Platform.OS === "web") {
@@ -498,41 +531,43 @@ export default function AdminUsersScreen() {
                       <Text style={[styles.actionText, { color: "#92400E" }]}>Edit</Text>
                     </Pressable>
 
-                    <Pressable
-                      onPress={() =>
-                        handleStatusToggle(
-                          emp,
-                          emp.status === "suspended" ? "active" : "suspended"
-                        )
-                      }
-                      style={[
-                        styles.actionButton,
-                        emp.status === "suspended" ? styles.reactivateBtn : styles.suspendBtn,
-                      ]}
-                    >
-                      <MaterialIcons
-                        color={emp.status === "suspended" ? "#059669" : "#DC2626"}
-                        name={emp.status === "suspended" ? "check-circle" : "block"}
-                        size={14}
-                      />
-                      <Text
-                        style={[
-                          styles.actionText,
-                          { color: emp.status === "suspended" ? "#059669" : "#DC2626" },
-                        ]}
-                      >
-                        {emp.status === "suspended" ? "Reactivate" : "Suspend"}
-                      </Text>
-                    </Pressable>
+                    {(emp.role !== "admin" || isSuperAdmin(data.session?.identifier)) && !isSuperAdmin(emp.identifier) && emp.id !== data.session?.id ? (
+                      <>
+                        <Pressable
+                          onPress={() =>
+                            handleStatusToggle(
+                              emp,
+                              emp.status === "suspended" ? "active" : "suspended"
+                            )
+                          }
+                          style={[
+                            styles.actionButton,
+                            emp.status === "suspended" ? styles.reactivateBtn : styles.suspendBtn,
+                          ]}
+                        >
+                          <MaterialIcons
+                            color={emp.status === "suspended" ? "#059669" : "#DC2626"}
+                            name={emp.status === "suspended" ? "check-circle" : "block"}
+                            size={14}
+                          />
+                          <Text
+                            style={[
+                              styles.actionText,
+                              { color: emp.status === "suspended" ? "#059669" : "#DC2626" },
+                            ]}
+                          >
+                            {emp.status === "suspended" ? "Reactivate" : "Suspend"}
+                          </Text>
+                        </Pressable>
 
-                    {emp.id !== data.session?.id ? (
-                      <Pressable
-                        onPress={() => handleSoftDelete(emp)}
-                        style={[styles.actionButton, styles.deleteBtn]}
-                      >
-                        <MaterialIcons color="#64748B" name="delete-outline" size={14} />
-                        <Text style={[styles.actionText, { color: "#64748B" }]}>Deactivate</Text>
-                      </Pressable>
+                        <Pressable
+                          onPress={() => handleSoftDelete(emp)}
+                          style={[styles.actionButton, styles.deleteBtn]}
+                        >
+                          <MaterialIcons color="#64748B" name="delete-outline" size={14} />
+                          <Text style={[styles.actionText, { color: "#64748B" }]}>Deactivate</Text>
+                        </Pressable>
+                      </>
                     ) : null}
 
                     <Pressable

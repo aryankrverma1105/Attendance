@@ -339,7 +339,18 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
 
   const removeManagedUser = useCallback((userId: string) => {
     const target = data.managedUsers.find((user) => user.id === userId);
-    if (!target || !canRemoveManagedAccount({ role: data.session?.role, actorId: data.session?.id, targetUserId: userId })) return false;
+    if (
+      !target ||
+      !canRemoveManagedAccount({
+        role: data.session?.role,
+        actorId: data.session?.id,
+        actorIdentifier: data.session?.identifier,
+        targetUserId: userId,
+        targetUserRole: target.role,
+        targetUserIdentifier: target.identifier,
+      })
+    )
+      return false;
     const removedAt = new Date().toISOString();
     const event: AccountLifecycleEvent = {
       id: createId("account-event"),
@@ -357,7 +368,7 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
       offlineQueue: [queueOperation("account", `Account removal for “${target.displayName}” awaiting secure sync`), ...current.offlineQueue],
     }));
     return true;
-  }, [data.managedUsers, data.session?.id, data.session?.role]);
+  }, [data.managedUsers, data.session?.id, data.session?.identifier, data.session?.role]);
 
   const updateManagedUser = useCallback((userId: string, updates: Partial<Omit<ManagedUser, "id" | "createdAt">>) => {
     if (!canAdminManageAccount(data.session?.role)) return false;
