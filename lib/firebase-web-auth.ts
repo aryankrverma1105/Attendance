@@ -1,6 +1,7 @@
 import { initializeApp, getApps, getApp } from "firebase/app";
 import {
   getAuth,
+  initializeAuth,
   RecaptchaVerifier,
   signInWithPhoneNumber,
   ConfirmationResult,
@@ -15,16 +16,29 @@ const firebaseConfig = {
   appId: "1:183614360333:web:de09841bb849e1ac063e44",
 };
 
+let cachedAuth: ReturnType<typeof getAuth> | null = null;
+
 export function getWebFirebaseAuth() {
   if (typeof window === "undefined") return null;
+  if (cachedAuth) return cachedAuth;
+
   const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
-  return getAuth(app);
+  try {
+    cachedAuth = getAuth(app);
+  } catch {
+    try {
+      cachedAuth = initializeAuth(app);
+    } catch {
+      cachedAuth = getAuth(app);
+    }
+  }
+  return cachedAuth;
 }
 
 declare global {
   interface Window {
     recaptchaVerifier?: RecaptchaVerifier;
-    recaptchaWidgetId?: any;
+    grecaptcha?: any;
   }
 }
 
@@ -34,7 +48,7 @@ export async function requestWebPhoneOtp(phoneNumber: string): Promise<Confirmat
     throw new Error("Web Firebase Auth is only available in browser environments.");
   }
 
-  // Ensure a DOM container exists for invisible reCAPTCHA
+  // Ensure recaptcha-container element exists in DOM
   let container = document.getElementById("recaptcha-container");
   if (!container) {
     container = document.createElement("div");
@@ -42,20 +56,28 @@ export async function requestWebPhoneOtp(phoneNumber: string): Promise<Confirmat
     document.body.appendChild(container);
   }
 
-  if (!window.recaptchaVerifier) {
-    window.recaptchaVerifier = new RecaptchaVerifier(auth, "recaptcha-container", {
-      size: "invisible",
-      callback: () => {
-        // reCAPTCHA solved - allow signInWithPhoneNumber
-      },
-      "expired-callback": () => {
-        if (window.recaptchaVerifier) {
-          window.recaptchaVerifier.clear();
-          window.recaptchaVerifier = undefined;
-        }
-      },
-    });
+  // Reset existing verifier if expired
+  if (window.recaptchaVerifier) {
+    try {
+      window.recaptchaVerifier.clear();
+    } catch {}
+    window.recaptchaVerifier = undefined;
   }
+
+  window.recaptchaVerifier = new RecaptchaVerifier(auth, "recaptcha-container", {
+    size: "invisible",
+    callback: () => {
+      // reCAPTCHA solved
+    },
+    "expired-callback": () => {
+      if (window.recaptchaVerifier) {
+        try {
+          window.recaptchaVerifier.clear();
+        } catch {}
+        window.recaptchaVerifier = undefined;
+      }
+    },
+  });
 
   return await signInWithPhoneNumber(auth, phoneNumber, window.recaptchaVerifier);
 }
