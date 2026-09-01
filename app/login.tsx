@@ -124,7 +124,12 @@ export default function LoginScreen() {
           return;
         } catch (webErr: any) {
           console.error("[Firebase Web Auth] Error sending SMS:", webErr);
-          setNotice(webErr?.message || "Failed to send SMS OTP. Ensure Phone Auth is enabled in Firebase Console.");
+          const rawMsg = webErr?.message || "";
+          if (rawMsg.includes("invalid-app-credential") || rawMsg.includes("400")) {
+            setNotice("Web Phone Auth requires registering a Web App in Firebase Console. Use Password mode to sign in on PC, or test SMS in the Android APK.");
+          } else {
+            setNotice(rawMsg || "Failed to send SMS OTP. Ensure Phone Auth is enabled in Firebase Console.");
+          }
           return;
         }
       }
