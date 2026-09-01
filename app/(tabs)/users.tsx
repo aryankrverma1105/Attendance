@@ -9,7 +9,9 @@ import {
   SectionHeading,
   StatusChip,
   Surface,
+  UserEditModal,
   WageEditModal,
+  type UserEditFormInput,
 } from "@/components/field-ui";
 import { ScreenContainer } from "@/components/screen-container";
 import {
@@ -31,7 +33,7 @@ const roleTitle: Record<FieldRole, string> = {
 
 export default function AdminUsersScreen() {
   const router = useRouter();
-  const { data, createManagedUser, updateEmployeeWage, removeManagedUser } = useFieldData();
+  const { data, createManagedUser, updateManagedUser, updateEmployeeWage, removeManagedUser } = useFieldData();
   const [query, setQuery] = useState("");
   const [roleFilter, setRoleFilter] = useState<"all" | FieldRole>("all");
   const [statusFilter, setStatusFilter] = useState<"all" | "active" | "paused" | "suspended" | "invited">("all");
@@ -476,6 +478,14 @@ export default function AdminUsersScreen() {
                   {/* Action Bar */}
                   <View style={styles.userActionsRow}>
                     <Pressable
+                      onPress={() => setEditingUser(emp)}
+                      style={[styles.actionButton, styles.editUserBtn]}
+                    >
+                      <MaterialIcons color="#D97706" name="edit" size={14} />
+                      <Text style={[styles.actionText, { color: "#92400E" }]}>Edit</Text>
+                    </Pressable>
+
+                    <Pressable
                       onPress={() =>
                         handleStatusToggle(
                           emp,
@@ -536,16 +546,16 @@ export default function AdminUsersScreen() {
           </Surface>
         )}
 
-        {/* Wage Edit Modal */}
+        {/* Full User Details Edit Modal */}
         {editingUser ? (
-          <WageEditModal
-            currentWage={editingUser.dailyWage || 0}
-            employeeName={editingUser.displayName}
+          <UserEditModal
+            managers={managers.map((m) => ({ id: m.id, displayName: m.displayName }))}
             onClose={() => setEditingUser(null)}
-            onSave={(newWage) => {
-              updateEmployeeWage(editingUser.id, newWage);
+            onSave={(userId, updates) => {
+              updateManagedUser(userId, updates);
               setEditingUser(null);
             }}
+            user={editingUser}
             visible={Boolean(editingUser)}
           />
         ) : null}
@@ -700,6 +710,7 @@ const styles = StyleSheet.create({
   suspendBtn: { backgroundColor: "#FEF2F2", borderColor: "#FECACA" },
   reactivateBtn: { backgroundColor: "#ECFDF5", borderColor: "#A7F3D0" },
   deleteBtn: { backgroundColor: "#F8FAFC", borderColor: "#E2E8F0" },
+  editUserBtn: { backgroundColor: "#FEF3C7", borderColor: "#FDE68A" },
   actionText: { fontSize: 11, fontWeight: "800" },
   detailBtn: {
     flexDirection: "row",

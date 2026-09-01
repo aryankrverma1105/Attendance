@@ -1,7 +1,8 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   Modal,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -283,6 +284,303 @@ export function WageEditModal({
             />
             <FieldButton
               label="Save Wage"
+              onPress={handleSave}
+              style={{ flex: 1 }}
+              variant="primary"
+            />
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+export type UserEditFormInput = {
+  displayName: string;
+  identifier: string;
+  role: "admin" | "manager" | "employee";
+  department?: string;
+  dailyWage?: number;
+  managerId?: string;
+  status: "active" | "suspended" | "invited";
+};
+
+/**
+ * Full User Profile Edit Modal for Administrator
+ */
+export function UserEditModal({
+  visible,
+  user,
+  managers = [],
+  onClose,
+  onSave,
+}: {
+  visible: boolean;
+  user: {
+    id: string;
+    displayName: string;
+    identifier: string;
+    role: "admin" | "manager" | "employee";
+    department?: string;
+    dailyWage?: number;
+    managerId?: string;
+    status: "active" | "suspended" | "invited";
+  } | null;
+  managers?: Array<{ id: string; displayName: string }>;
+  onClose: () => void;
+  onSave: (userId: string, updates: UserEditFormInput) => void;
+}) {
+  const [name, setName] = useState("");
+  const [identifier, setIdentifier] = useState("");
+  const [role, setRole] = useState<"admin" | "manager" | "employee">("employee");
+  const [department, setDepartment] = useState("");
+  const [wageText, setWageText] = useState("");
+  const [selectedManagerId, setSelectedManagerId] = useState("");
+  const [status, setStatus] = useState<"active" | "suspended" | "invited">("active");
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (user) {
+      setName(user.displayName || "");
+      setIdentifier(user.identifier || "");
+      setRole(user.role || "employee");
+      setDepartment(user.department || "");
+      setWageText(user.dailyWage ? String(user.dailyWage) : "");
+      setSelectedManagerId(user.managerId || "");
+      setStatus(user.status || "active");
+      setError(null);
+    }
+  }, [user]);
+
+  if (!user) return null;
+
+  const handleSave = () => {
+    if (!name.trim()) {
+      setError("Full name cannot be empty.");
+      return;
+    }
+    if (!identifier.trim()) {
+      setError("Mobile number or identifier is required.");
+      return;
+    }
+
+    let parsedWage = 0;
+    if (role === "employee" && wageText.trim()) {
+      parsedWage = Number(wageText.trim());
+      if (isNaN(parsedWage) || parsedWage < 0) {
+        setError("Please enter a valid daily wage.");
+        return;
+      }
+      if (parsedWage > 100000) {
+        setError("Daily wage cannot exceed ₹100,000.");
+        return;
+      }
+    }
+
+    setError(null);
+    onSave(user.id, {
+      displayName: name.trim(),
+      identifier: identifier.trim(),
+      role,
+      department: department.trim() || undefined,
+      dailyWage: role === "employee" ? Math.round(parsedWage) : 0,
+      managerId: role === "employee" && selectedManagerId ? selectedManagerId : undefined,
+      status,
+    });
+    onClose();
+  };
+
+  return (
+    <Modal animationType="fade" onRequestClose={onClose} transparent visible={visible}>
+      <View style={styles.modalBackdrop}>
+        <View style={[styles.modalContainer, { maxHeight: "90%", padding: 18 }]}>
+          <View style={styles.modalHeader}>
+            <View style={styles.modalHeaderIcon}>
+              <MaterialIcons color="#D97706" name="manage-accounts" size={22} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.modalTitle}>Edit User Details</Text>
+              <Text style={styles.modalSubtitle}>{user.displayName}</Text>
+            </View>
+            <Pressable onPress={onClose} style={styles.modalClose}>
+              <MaterialIcons color="#64748B" name="close" size={20} />
+            </Pressable>
+          </View>
+
+          <ScrollView showsVerticalScrollIndicator={false} style={{ marginVertical: 4 }}>
+            <View style={styles.modalBody}>
+              {/* Full Name */}
+              <Text style={styles.inputLabel}>FULL NAME</Text>
+              <TextInput
+                onChangeText={(val) => {
+                  setName(val);
+                  setError(null);
+                }}
+                placeholder="e.g. Rahul Sharma"
+                placeholderTextColor="#94A3B8"
+                style={[styles.inputRow, { minHeight: 46, color: "#0B192C", fontSize: 14, fontWeight: "600" }]}
+                value={name}
+              />
+
+              {/* Mobile Number */}
+              <Text style={styles.inputLabel}>MOBILE NUMBER / IDENTIFIER</Text>
+              <TextInput
+                keyboardType="phone-pad"
+                onChangeText={(val) => {
+                  setIdentifier(val);
+                  setError(null);
+                }}
+                placeholder="e.g. 9835916278"
+                placeholderTextColor="#94A3B8"
+                style={[styles.inputRow, { minHeight: 46, color: "#0B192C", fontSize: 14, fontWeight: "600" }]}
+                value={identifier}
+              />
+
+              {/* Role */}
+              <Text style={styles.inputLabel}>ORGANIZATION ROLE</Text>
+              <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap" }}>
+                {(["employee", "manager", "admin"] as const).map((r) => {
+                  const active = role === r;
+                  const label = r === "admin" ? "Administrator" : r === "manager" ? "Manager" : "Field Employee";
+                  return (
+                    <Pressable
+                      key={r}
+                      onPress={() => setRole(r)}
+                      style={{
+                        paddingHorizontal: 12,
+                        paddingVertical: 7,
+                        borderRadius: 10,
+                        borderWidth: 1,
+                        borderColor: active ? "#F59E0B" : "#CBD5E1",
+                        backgroundColor: active ? "#FEF3C7" : "#FFFFFF",
+                      }}
+                    >
+                      <Text style={{ fontSize: 12, fontWeight: active ? "900" : "600", color: active ? "#92400E" : "#64748B" }}>
+                        {label}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+
+              {/* Department */}
+              <Text style={styles.inputLabel}>DEPARTMENT / LOCATION</Text>
+              <TextInput
+                onChangeText={setDepartment}
+                placeholder="e.g. Solar Field Ops, Site QA"
+                placeholderTextColor="#94A3B8"
+                style={[styles.inputRow, { minHeight: 46, color: "#0B192C", fontSize: 14 }]}
+                value={department}
+              />
+
+              {/* Employee specific fields: Wage and Manager */}
+              {role === "employee" ? (
+                <>
+                  <Text style={styles.inputLabel}>DAILY WAGE (₹ / DAY)</Text>
+                  <View style={styles.inputRow}>
+                    <Text style={styles.currencyPrefix}>₹</Text>
+                    <TextInput
+                      keyboardType="numeric"
+                      onChangeText={(val) => {
+                        setWageText(val);
+                        setError(null);
+                      }}
+                      placeholder="e.g. 750"
+                      placeholderTextColor="#94A3B8"
+                      style={styles.modalInput}
+                      value={wageText}
+                    />
+                  </View>
+
+                  {managers.length > 0 ? (
+                    <>
+                      <Text style={styles.inputLabel}>ASSIGNED MANAGER</Text>
+                      <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap" }}>
+                        <Pressable
+                          onPress={() => setSelectedManagerId("")}
+                          style={{
+                            paddingHorizontal: 10,
+                            paddingVertical: 6,
+                            borderRadius: 8,
+                            borderWidth: 1,
+                            borderColor: !selectedManagerId ? "#F59E0B" : "#CBD5E1",
+                            backgroundColor: !selectedManagerId ? "#FEF3C7" : "#FFFFFF",
+                          }}
+                        >
+                          <Text style={{ fontSize: 11, fontWeight: "700", color: !selectedManagerId ? "#92400E" : "#64748B" }}>
+                            None / Direct
+                          </Text>
+                        </Pressable>
+                        {managers.map((mgr) => {
+                          const active = selectedManagerId === mgr.id;
+                          return (
+                            <Pressable
+                              key={mgr.id}
+                              onPress={() => setSelectedManagerId(mgr.id)}
+                              style={{
+                                paddingHorizontal: 10,
+                                paddingVertical: 6,
+                                borderRadius: 8,
+                                borderWidth: 1,
+                                borderColor: active ? "#F59E0B" : "#CBD5E1",
+                                backgroundColor: active ? "#FEF3C7" : "#FFFFFF",
+                              }}
+                            >
+                              <Text style={{ fontSize: 11, fontWeight: active ? "900" : "600", color: active ? "#92400E" : "#64748B" }}>
+                                {mgr.displayName}
+                              </Text>
+                            </Pressable>
+                          );
+                        })}
+                      </View>
+                    </>
+                  ) : null}
+                </>
+              ) : null}
+
+              {/* Status */}
+              <Text style={styles.inputLabel}>ACCOUNT STATUS</Text>
+              <View style={{ flexDirection: "row", gap: 6 }}>
+                {(["active", "suspended", "invited"] as const).map((s) => {
+                  const active = status === s;
+                  const label = s.charAt(0).toUpperCase() + s.slice(1);
+                  const activeBg = s === "active" ? "#ECFDF5" : s === "suspended" ? "#FEF2F2" : "#FFFBEB";
+                  const activeBorder = s === "active" ? "#10B981" : s === "suspended" ? "#EF4444" : "#F59E0B";
+                  const activeColor = s === "active" ? "#047857" : s === "suspended" ? "#B91C1C" : "#B45309";
+                  return (
+                    <Pressable
+                      key={s}
+                      onPress={() => setStatus(s)}
+                      style={{
+                        paddingHorizontal: 12,
+                        paddingVertical: 7,
+                        borderRadius: 10,
+                        borderWidth: 1,
+                        borderColor: active ? activeBorder : "#CBD5E1",
+                        backgroundColor: active ? activeBg : "#FFFFFF",
+                      }}
+                    >
+                      <Text style={{ fontSize: 12, fontWeight: active ? "900" : "600", color: active ? activeColor : "#64748B" }}>
+                        {label}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+
+              {error ? <Text style={styles.errorText}>{error}</Text> : null}
+            </View>
+          </ScrollView>
+
+          <View style={styles.modalFooter}>
+            <FieldButton
+              label="Cancel"
+              onPress={onClose}
+              style={{ flex: 1 }}
+              variant="secondary"
+            />
+            <FieldButton
+              label="Save Changes"
               onPress={handleSave}
               style={{ flex: 1 }}
               variant="primary"

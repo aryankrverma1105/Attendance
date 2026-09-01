@@ -85,6 +85,7 @@ type FieldDataContextValue = {
   createManagedUser: (input: Omit<ManagedUser, "id" | "accountLinkId" | "status" | "createdAt" | "accessIssuedAt">) => string;
   issueManagedUserAccess: (userId: string) => boolean;
   removeManagedUser: (userId: string) => boolean;
+  updateManagedUser: (userId: string, updates: Partial<Omit<ManagedUser, "id" | "createdAt">>) => boolean;
   updateEmployeeWage: (userId: string, newDailyWage: number) => boolean;
   createTask: (input: {
     title: string;
@@ -357,6 +358,42 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
     }));
     return true;
   }, [data.managedUsers, data.session?.id, data.session?.role]);
+
+  const updateManagedUser = useCallback((userId: string, updates: Partial<Omit<ManagedUser, "id" | "createdAt">>) => {
+    if (!canAdminManageAccount(data.session?.role)) return false;
+    const target = data.managedUsers.find((user) => user.id === userId);
+    if (!target) return false;
+
+    let cleanPhone = updates.identifier !== undefined ? updates.identifier.trim() : target.identifier;
+    if (cleanPhone) {
+      if (/^\d{10}$/.test(cleanPhone)) cleanPhone = `+91${cleanPhone}`;
+      else if (!cleanPhone.startsWith("+") && /^\d+$/.test(cleanPhone)) cleanPhone = `+${cleanPhone}`;
+    }
+
+    const validatedWage = updates.dailyWage !== undefined
+      ? Math.max(0, Math.min(100000, Math.round(updates.dailyWage || 0)))
+      : target.dailyWage;
+
+    setData((current) => ({
+      ...current,
+      managedUsers: current.managedUsers.map((user) =>
+        user.id === userId
+          ? {
+              ...user,
+              ...updates,
+              identifier: cleanPhone,
+              dailyWage: (updates.role || user.role) === "employee" ? validatedWage : 0,
+              displayName: updates.displayName?.trim() || user.displayName,
+            }
+          : user
+      ),
+      offlineQueue: [
+        queueOperation("account", `Updated account details for “${updates.displayName || target.displayName}”`),
+        ...current.offlineQueue,
+      ],
+    }));
+    return true;
+  }, [data.managedUsers, data.session?.role]);
 
   const updateEmployeeWage = useCallback((userId: string, newDailyWage: number) => {
     const target = data.managedUsers.find((user) => user.id === userId);
@@ -659,6 +696,7 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
       createManagedUser,
       issueManagedUserAccess,
       removeManagedUser,
+      updateManagedUser,
       updateEmployeeWage,
       createTask,
       updateTaskStatus,
@@ -682,6 +720,7 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
       createManagedUser,
       issueManagedUserAccess,
       removeManagedUser,
+      updateManagedUser,
       updateEmployeeWage,
       createVisit,
       data,

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Image, KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { Image, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useRouter } from "expo-router";
 import { LinearGradient } from "expo-linear-gradient";
 import MaterialIcons from "@expo/vector-icons/MaterialIcons";
@@ -205,126 +205,161 @@ export default function LoginScreen() {
   return (
     <ScreenContainer edges={["top", "bottom", "left", "right"]} containerClassName="bg-background" className="px-5">
       <LinearGradient colors={["#EAF9F8", "#F6FCFD", "#EFF6FA"]} style={StyleSheet.absoluteFillObject} />
-      <KeyboardAvoidingView behavior={Platform.select({ ios: "padding", default: undefined })} style={styles.flex}>
-        <View style={styles.topArea}>
-          <View style={styles.brandRow}><Image resizeMode="contain" source={require("@/assets/images/sologix-logo.png")} style={styles.sologixLogo} /></View>
-          <DepthOrb />
-          <View style={styles.heroCopy}>
-            <StatusChip label="Sologix Energy field operations" tone="success" />
-            <Text style={styles.title}>Energizing every field shift with verified proof.</Text>
-            <Text style={styles.subtitle}>Sologix Energy Pvt Ltd uses this secure workspace for attendance, customer visits, and field workforce management.</Text>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
+        keyboardVerticalOffset={Platform.OS === "ios" ? 12 : 0}
+        style={{ flex: 1 }}
+      >
+        <ScrollView
+          contentContainerStyle={styles.scrollContent}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+          bounces={false}
+        >
+          <View style={styles.topArea}>
+            <View style={styles.brandRow}>
+              <Image resizeMode="contain" source={require("@/assets/images/sologix-logo.png")} style={styles.sologixLogo} />
+            </View>
+            <DepthOrb />
+            <View style={styles.heroCopy}>
+              <StatusChip label="Sologix Energy field operations" tone="success" />
+              <Text style={styles.title}>Energizing every field shift with verified proof.</Text>
+              <Text style={styles.subtitle}>
+                Sologix Energy Pvt Ltd uses this secure workspace for attendance, customer visits, and field workforce management.
+              </Text>
+            </View>
           </View>
-        </View>
 
-        <View style={styles.sheet}>
-          <Text style={styles.sheetTitle}>Sign in</Text>
-          <Text style={styles.sheetSubtitle}>
-            {verificationStep === "request"
-              ? "Use your registered mobile number or work email."
-              : `Enter the code sent to ${identifier}`}
-          </Text>
+          <View style={styles.sheet}>
+            <Text style={styles.sheetTitle}>Sign in</Text>
+            <Text style={styles.sheetSubtitle}>
+              {verificationStep === "request"
+                ? "Use your registered mobile number or work email."
+                : `Enter the code sent to ${identifier}`}
+            </Text>
 
-          {verificationStep === "request" ? (
-            <>
-              <TextInput
-                autoCapitalize="none"
-                autoComplete="email"
-                keyboardType="email-address"
-                onChangeText={setIdentifier}
-                placeholder="Mobile number (e.g. 9835916278)"
-                placeholderTextColor="#74899A"
-                style={styles.input}
-                value={identifier}
-              />
-              <View style={styles.modeRow}>
-                <Pressable onPress={() => setMode("password")} style={[styles.modeButton, mode === "password" && styles.modeButtonActive]}>
-                  <Text style={[styles.modeText, mode === "password" && styles.modeTextActive]}>Password</Text>
-                </Pressable>
-                <Pressable onPress={() => setMode("otp")} style={[styles.modeButton, mode === "otp" && styles.modeButtonActive]}>
-                  <Text style={[styles.modeText, mode === "otp" && styles.modeTextActive]}>One-time code</Text>
-                </Pressable>
-              </View>
-              {mode === "password" ? (
+            {verificationStep === "request" ? (
+              <>
                 <TextInput
                   autoCapitalize="none"
-                  onChangeText={setPassword}
-                  placeholder="Password"
+                  autoComplete="email"
+                  keyboardType="email-address"
+                  onChangeText={setIdentifier}
+                  placeholder="Mobile number (e.g. 9835916278)"
                   placeholderTextColor="#74899A"
-                  secureTextEntry
                   style={styles.input}
-                  value={password}
+                  value={identifier}
                 />
-              ) : null}
-            </>
-          ) : (
-            <>
-              <TextInput
-                keyboardType="number-pad"
-                onChangeText={setVerificationCode}
-                placeholder="6-digit verification code"
-                placeholderTextColor="#74899A"
-                style={styles.input}
-                value={verificationCode}
-                maxLength={6}
+                <View style={styles.modeRow}>
+                  <Pressable onPress={() => setMode("password")} style={[styles.modeButton, mode === "password" && styles.modeButtonActive]}>
+                    <Text style={[styles.modeText, mode === "password" && styles.modeTextActive]}>Password</Text>
+                  </Pressable>
+                  <Pressable onPress={() => setMode("otp")} style={[styles.modeButton, mode === "otp" && styles.modeButtonActive]}>
+                    <Text style={[styles.modeText, mode === "otp" && styles.modeTextActive]}>One-time code</Text>
+                  </Pressable>
+                </View>
+                {mode === "password" ? (
+                  <TextInput
+                    autoCapitalize="none"
+                    onChangeText={setPassword}
+                    placeholder="Password"
+                    placeholderTextColor="#74899A"
+                    secureTextEntry
+                    style={styles.input}
+                    value={password}
+                  />
+                ) : null}
+              </>
+            ) : (
+              <>
+                <TextInput
+                  keyboardType="number-pad"
+                  onChangeText={setVerificationCode}
+                  placeholder="6-digit verification code"
+                  placeholderTextColor="#74899A"
+                  style={styles.input}
+                  value={verificationCode}
+                  maxLength={6}
+                />
+                <Pressable
+                  onPress={() => {
+                    setVerificationStep("request");
+                    setVerificationCode("");
+                    setNotice(null);
+                  }}
+                  style={{ paddingVertical: 8, marginBottom: 4 }}
+                >
+                  <Text style={{ color: "#13C5B8", fontWeight: "600" }}>← Use a different number</Text>
+                </Pressable>
+              </>
+            )}
+
+            {notice ? <Text style={styles.notice}>{notice}</Text> : null}
+
+            {verificationStep === "request" ? (
+              <FieldButton
+                icon={mode === "password" ? "vpn-key" : "lock-outline"}
+                label={mode === "password" ? "Continue securely" : "Request secure code"}
+                onPress={requestAuthentication}
+                style={styles.action}
+                loading={activateMutation.isPending}
               />
-              <Pressable
-                onPress={() => {
-                  setVerificationStep("request");
-                  setVerificationCode("");
-                  setNotice(null);
-                }}
-                style={{ paddingVertical: 8, marginBottom: 12 }}
-              >
-                <Text style={{ color: "#13C5B8", fontWeight: "600" }}>← Use a different number</Text>
-              </Pressable>
-            </>
-          )}
+            ) : (
+              <FieldButton
+                icon="verified-user"
+                label="Verify secure code"
+                onPress={confirmCode}
+                style={styles.action}
+                loading={activateMutation.isPending}
+              />
+            )}
 
-          {notice ? <Text style={styles.notice}>{notice}</Text> : null}
-
-          {verificationStep === "request" ? (
-            <FieldButton
-              icon={mode === "password" ? "vpn-key" : "lock-outline"}
-              label={mode === "password" ? "Continue securely" : "Request secure code"}
-              onPress={requestAuthentication}
-              style={styles.action}
-              loading={activateMutation.isPending}
-            />
-          ) : (
-            <FieldButton
-              icon="verified-user"
-              label="Verify secure code"
-              onPress={confirmCode}
-              style={styles.action}
-              loading={activateMutation.isPending}
-            />
-          )}
-
-          <Text style={styles.footnote}>Sologix Energy Pvt Ltd · Authorized Personnel Only</Text>
-        </View>
+            <Text style={styles.footnote}>Sologix Energy Pvt Ltd · Authorized Personnel Only</Text>
+          </View>
+        </ScrollView>
       </KeyboardAvoidingView>
     </ScreenContainer>
   );
 }
 
 const styles = StyleSheet.create({
-  flex: { flex: 1, justifyContent: "space-between" },
-  topArea: { paddingTop: 10 },
-  brandRow: { height: 58, alignItems: "flex-start", justifyContent: "center" },
-  sologixLogo: { width: 176, height: 58 },
-  heroCopy: { gap: 12, marginTop: 2 },
-  title: { color: "#17354A", fontSize: 30, lineHeight: 36, letterSpacing: -0.9, fontWeight: "900", maxWidth: 340 },
-  subtitle: { color: "#547087", fontSize: 15, lineHeight: 22, maxWidth: 350 },
-  sheet: { backgroundColor: "rgba(255,255,255,0.96)", marginHorizontal: -20, borderTopLeftRadius: 30, borderTopRightRadius: 30, paddingHorizontal: 22, paddingTop: 24, paddingBottom: 24, gap: 12, borderTopWidth: 1, borderTopColor: "#E0EBF0" },
-  sheetTitle: { color: "#17354A", fontSize: 23, fontWeight: "900", letterSpacing: -0.4 },
-  sheetSubtitle: { color: "#7E96A9", fontSize: 14, lineHeight: 20, marginBottom: 4 },
-  input: { minHeight: 52, borderRadius: 15, backgroundColor: "#F8FBFC", color: "#17354A", fontSize: 15, paddingHorizontal: 15, borderWidth: 1, borderColor: "#DDEAF0" },
-  modeRow: { padding: 4, backgroundColor: "#EFF6F8", borderRadius: 13, flexDirection: "row" },
-  modeButton: { flex: 1, minHeight: 38, justifyContent: "center", alignItems: "center", borderRadius: 10 },
+  scrollContent: {
+    flexGrow: 1,
+    justifyContent: "space-between",
+    paddingBottom: 20,
+  },
+  topArea: { paddingTop: 6, paddingBottom: 12 },
+  brandRow: { height: 50, alignItems: "flex-start", justifyContent: "center" },
+  sologixLogo: { width: 160, height: 50 },
+  heroCopy: { gap: 8, marginTop: 2 },
+  title: { color: "#17354A", fontSize: 26, lineHeight: 32, letterSpacing: -0.8, fontWeight: "900", maxWidth: 340 },
+  subtitle: { color: "#547087", fontSize: 14, lineHeight: 20, maxWidth: 350 },
+  sheet: {
+    backgroundColor: "rgba(255,255,255,0.98)",
+    marginHorizontal: -20,
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    paddingHorizontal: 22,
+    paddingTop: 20,
+    paddingBottom: 24,
+    gap: 10,
+    borderTopWidth: 1,
+    borderTopColor: "#E0EBF0",
+    shadowColor: "#0F2837",
+    shadowOpacity: 0.08,
+    shadowOffset: { width: 0, height: -4 },
+    shadowRadius: 16,
+    elevation: 8,
+  },
+  sheetTitle: { color: "#17354A", fontSize: 22, fontWeight: "900", letterSpacing: -0.4 },
+  sheetSubtitle: { color: "#7E96A9", fontSize: 13, lineHeight: 18, marginBottom: 2 },
+  input: { minHeight: 50, borderRadius: 14, backgroundColor: "#F8FBFC", color: "#17354A", fontSize: 15, paddingHorizontal: 15, borderWidth: 1, borderColor: "#DDEAF0" },
+  modeRow: { padding: 4, backgroundColor: "#EFF6F8", borderRadius: 12, flexDirection: "row" },
+  modeButton: { flex: 1, minHeight: 36, justifyContent: "center", alignItems: "center", borderRadius: 10 },
   modeButtonActive: { backgroundColor: "#FFFFFF", shadowColor: "#527085", shadowOpacity: 0.09, shadowOffset: { width: 0, height: 3 }, shadowRadius: 7, elevation: 2 },
   modeText: { color: "#7E96A9", fontWeight: "700", fontSize: 13 },
   modeTextActive: { color: "#17354A" },
   notice: { color: "#DC2626", fontSize: 13, lineHeight: 18, paddingHorizontal: 2, fontWeight: "600" },
   action: { marginTop: 4 },
-  footnote: { color: "#7E96A9", fontSize: 11, lineHeight: 16, textAlign: "center", paddingHorizontal: 8, marginTop: 6 },
+  footnote: { color: "#7E96A9", fontSize: 11, lineHeight: 16, textAlign: "center", paddingHorizontal: 8, marginTop: 4 },
 });
