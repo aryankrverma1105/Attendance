@@ -45,7 +45,7 @@ const config: ExpoConfig = {
     },
     edgeToEdgeEnabled: true,
     predictiveBackGestureEnabled: false,
-    googleServicesFile: process.env.GOOGLE_SERVICES_JSON ?? (fs.existsSync("./google-services.json") ? "./google-services.json" : undefined),
+    googleServicesFile: "./google-services.json",
     package: env.androidPackage,
     permissions: [
       "POST_NOTIFICATIONS",
@@ -59,6 +59,8 @@ const config: ExpoConfig = {
   web: { bundler: "metro", output: "static", favicon: "./assets/images/favicon.png" },
   plugins: [
     "expo-router",
+    "@react-native-firebase/app",
+    "@react-native-firebase/auth",
     ["expo-camera", { cameraPermission: "Allow $(PRODUCT_NAME) to capture attendance and visit evidence." }],
     [
       "expo-location",

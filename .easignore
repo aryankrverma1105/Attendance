@@ -1,0 +1,15 @@
+# EAS Build ignore file (overrides .gitignore for EAS uploads)
+node_modules/
+.expo/
+dist/
+web-build/
+.git/
+/ios
+/android
+.vscode/
+.idea/
+logs
+*.log
+.cache/
+.webdev/
+*.tsbuildinfo
