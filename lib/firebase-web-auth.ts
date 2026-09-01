@@ -1,12 +1,3 @@
-import { initializeApp, getApps, getApp } from "firebase/app";
-import {
-  getAuth,
-  initializeAuth,
-  RecaptchaVerifier,
-  signInWithPhoneNumber,
-  ConfirmationResult,
-} from "firebase/auth";
-
 const firebaseConfig = {
   apiKey: "AIzaSyBpYt8JvAiZ5_lVolhpmpqXkPBsFAJ7y3M",
   authDomain: "aquasense-477908.firebaseapp.com",
@@ -16,39 +7,64 @@ const firebaseConfig = {
   appId: "1:183614360333:web:de09841bb849e1ac063e44",
 };
 
-let cachedAuth: ReturnType<typeof getAuth> | null = null;
-
-export function getWebFirebaseAuth() {
-  if (typeof window === "undefined") return null;
-  if (cachedAuth) return cachedAuth;
-
-  const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
-  try {
-    cachedAuth = getAuth(app);
-  } catch {
-    try {
-      cachedAuth = initializeAuth(app);
-    } catch {
-      cachedAuth = getAuth(app);
-    }
+/**
+ * Loads the official Firebase Web SDK dynamically into the browser to guarantee
+ * 100% reliable initialization without Metro / React-Native package bundling conflicts.
+ */
+export async function loadFirebaseWebSDK(): Promise<any> {
+  if (typeof window === "undefined" || typeof document === "undefined") {
+    throw new Error("Firebase Web SDK is only supported in browser environments.");
   }
-  return cachedAuth;
+
+  const win = window as any;
+
+  if (!win.firebase) {
+    await new Promise<void>((resolve, reject) => {
+      const existing = document.querySelector('script[src*="firebase-app-compat.js"]');
+      if (existing) {
+        existing.addEventListener("load", () => resolve());
+        return;
+      }
+      const script = document.createElement("script");
+      script.src = "https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js";
+      script.async = true;
+      script.onload = () => resolve();
+      script.onerror = () => reject(new Error("Failed to load Firebase App library from Google CDN."));
+      document.head.appendChild(script);
+    });
+  }
+
+  if (!win.firebase?.auth) {
+    await new Promise<void>((resolve, reject) => {
+      const existing = document.querySelector('script[src*="firebase-auth-compat.js"]');
+      if (existing) {
+        existing.addEventListener("load", () => resolve());
+        return;
+      }
+      const script = document.createElement("script");
+      script.src = "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js";
+      script.async = true;
+      script.onload = () => resolve();
+      script.onerror = () => reject(new Error("Failed to load Firebase Auth library from Google CDN."));
+      document.head.appendChild(script);
+    });
+  }
+
+  const fb = (window as any).firebase;
+  if (fb && (!fb.apps || fb.apps.length === 0)) {
+    fb.initializeApp(firebaseConfig);
+  }
+
+  return fb;
 }
 
-declare global {
-  interface Window {
-    recaptchaVerifier?: RecaptchaVerifier;
-    grecaptcha?: any;
-  }
-}
-
-export async function requestWebPhoneOtp(phoneNumber: string): Promise<ConfirmationResult> {
-  const auth = getWebFirebaseAuth();
-  if (!auth || typeof window === "undefined") {
-    throw new Error("Web Firebase Auth is only available in browser environments.");
+export async function requestWebPhoneOtp(phoneNumber: string): Promise<any> {
+  const firebase = await loadFirebaseWebSDK();
+  if (!firebase || !firebase.auth) {
+    throw new Error("Firebase Authentication could not be loaded in this browser.");
   }
 
-  // Ensure recaptcha-container element exists in DOM
+  // Ensure DOM anchor element exists for invisible reCAPTCHA
   let container = document.getElementById("recaptcha-container");
   if (!container) {
     container = document.createElement("div");
@@ -56,28 +72,27 @@ export async function requestWebPhoneOtp(phoneNumber: string): Promise<Confirmat
     document.body.appendChild(container);
   }
 
-  // Reset existing verifier if expired
-  if (window.recaptchaVerifier) {
+  const win = window as any;
+
+  if (win.recaptchaVerifier) {
     try {
-      window.recaptchaVerifier.clear();
+      win.recaptchaVerifier.clear();
     } catch {}
-    window.recaptchaVerifier = undefined;
+    win.recaptchaVerifier = undefined;
   }
 
-  window.recaptchaVerifier = new RecaptchaVerifier(auth, "recaptcha-container", {
+  win.recaptchaVerifier = new firebase.auth.RecaptchaVerifier("recaptcha-container", {
     size: "invisible",
     callback: () => {
-      // reCAPTCHA solved
+      // reCAPTCHA verified
     },
     "expired-callback": () => {
-      if (window.recaptchaVerifier) {
-        try {
-          window.recaptchaVerifier.clear();
-        } catch {}
-        window.recaptchaVerifier = undefined;
-      }
+      try {
+        win.recaptchaVerifier?.clear();
+      } catch {}
+      win.recaptchaVerifier = undefined;
     },
   });
 
-  return await signInWithPhoneNumber(auth, phoneNumber, window.recaptchaVerifier);
+  return await firebase.auth().signInWithPhoneNumber(phoneNumber, win.recaptchaVerifier);
 }
