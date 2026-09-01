@@ -123,7 +123,12 @@ export default function LoginScreen() {
           return;
         } catch (webErr: any) {
           console.error("[Firebase Web Auth] Error:", webErr);
-          setNotice(webErr?.message || "Failed to send SMS code. Ensure Phone Auth is enabled in Firebase Console.");
+          const rawMsg = webErr?.message || "";
+          if (rawMsg.includes("internal-error")) {
+            setNotice("Firebase Web App is not yet registered in Firebase Console for this project. Please switch to Password mode on PC, or test on Android APK.");
+          } else {
+            setNotice(rawMsg || "Failed to send SMS code. Ensure Phone Auth is enabled in Firebase Console.");
+          }
           return;
         }
       }
