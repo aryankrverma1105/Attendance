@@ -521,31 +521,36 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
     const status = verificationStatus(input.location);
 
     setData((current) => {
-      const openAttendance = current.attendance.find((record) => !record.checkOutAt && (!record.employeeId || record.employeeId === current.session?.id));
+      const openAttendance = current.attendance.find(
+        (record) => !record.checkOutAt && (!record.employeeId || record.employeeId === current.session?.id || getDayKey(record.checkInAt) === getDayKey(capturedAt))
+      );
 
-      if (input.action === "check-out" && openAttendance) {
-        const checkoutStatus: AttendanceRecord["status"] =
-          openAttendance.status === "verified" && status === "verified" ? "verified" : "review";
-        const updatedAttendance = current.attendance.map((record) =>
-          record.id === openAttendance.id
-            ? {
-                ...record,
-                checkOutAt: capturedAt,
-                checkOutPhotoUri: input.photoUri,
-                checkOutLocation: input.location,
-                status: checkoutStatus,
-                syncState: "awaiting-server" as const,
-              }
-            : record,
-        );
-        return {
-          ...current,
-          attendance: updatedAttendance,
-          offlineQueue: [
-            queueOperation("attendance", "Attendance check-out awaiting secure sync"),
-            ...current.offlineQueue,
-          ],
-        };
+      if (input.action === "check-out") {
+        const targetRecord = openAttendance || current.attendance.find((record) => getDayKey(record.checkInAt) === getDayKey(capturedAt));
+        if (targetRecord) {
+          const checkoutStatus: AttendanceRecord["status"] =
+            targetRecord.status === "verified" && status === "verified" ? "verified" : "review";
+          const updatedAttendance = current.attendance.map((record) =>
+            record.id === targetRecord.id
+              ? {
+                  ...record,
+                  checkOutAt: capturedAt,
+                  checkOutPhotoUri: input.photoUri,
+                  checkOutLocation: input.location,
+                  status: checkoutStatus,
+                  syncState: "awaiting-server" as const,
+                }
+              : record,
+          );
+          return {
+            ...current,
+            attendance: updatedAttendance,
+            offlineQueue: [
+              queueOperation("attendance", "Attendance check-out awaiting secure sync"),
+              ...current.offlineQueue,
+            ],
+          };
+        }
       }
 
       const record: AttendanceRecord = {

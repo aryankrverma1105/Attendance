@@ -62,7 +62,10 @@ export default function HomeScreen() {
   }, [managedUser, user]);
 
   // Employee attendance for today
-  const todayAttendance = data.attendance.find((record) => getDayKey(record.checkInAt) === today);
+  const todayAttendance = data.attendance.find(
+    (record) => (!record.employeeId || record.employeeId === user?.id) && getDayKey(record.checkInAt) === today
+  );
+  const isShiftComplete = Boolean(todayAttendance && todayAttendance.checkOutAt);
   const needsCheckout = Boolean(todayAttendance && !todayAttendance.checkOutAt);
 
   // Employee-specific worked days and earnings calculation
@@ -441,31 +444,54 @@ export default function HomeScreen() {
             {/* Solar Attendance Card */}
             <Surface style={styles.checkinCard}>
               <View style={styles.checkinHeader}>
-                <View style={styles.checkinIconWrap}>
+                <View style={[
+                  styles.checkinIconWrap,
+                  isShiftComplete && { backgroundColor: "#DCFCE7" },
+                ]}>
                   <MaterialIcons
-                    color={needsCheckout ? "#10B981" : "#D97706"}
-                    name={needsCheckout ? "how-to-reg" : "access-time"}
+                    color={isShiftComplete ? "#16A34A" : needsCheckout ? "#10B981" : "#D97706"}
+                    name={isShiftComplete ? "task-alt" : needsCheckout ? "how-to-reg" : "access-time"}
                     size={24}
                   />
                 </View>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.checkinTitle}>
-                    {needsCheckout ? "Currently On Shift" : "Ready to Start Shift"}
+                    {isShiftComplete
+                      ? "Shift Completed for Today"
+                      : needsCheckout
+                      ? "Currently On Shift"
+                      : "Ready to Start Shift"}
                   </Text>
                   <Text style={styles.checkinSubtitle}>
-                    {needsCheckout
+                    {isShiftComplete
+                      ? `Shift logged: ${formatTime(todayAttendance?.checkInAt)} → ${formatTime(todayAttendance?.checkOutAt)} · Verified`
+                      : needsCheckout
                       ? `Checked in at ${formatTime(todayAttendance?.checkInAt)} · GPS Verified`
                       : "Capture your morning GPS location to mark attendance."}
                   </Text>
                 </View>
               </View>
 
-              <FieldButton
-                icon={needsCheckout ? "logout" : "login"}
-                label={needsCheckout ? "Check out for today" : "Check in with GPS"}
-                onPress={() => router.push("/attendance")}
-                variant={needsCheckout ? "secondary" : "primary"}
-              />
+              {isShiftComplete ? (
+                <FieldButton
+                  icon="history"
+                  label="View Today's Shift Evidence"
+                  onPress={() => router.push("/history")}
+                  variant="secondary"
+                />
+              ) : (
+                <FieldButton
+                  icon={needsCheckout ? "logout" : "login"}
+                  label={needsCheckout ? "Check out for today" : "Check in with GPS"}
+                  onPress={() =>
+                    router.push({
+                      pathname: "/attendance",
+                      params: { action: needsCheckout ? "check-out" : "check-in" },
+                    })
+                  }
+                  variant={needsCheckout ? "secondary" : "primary"}
+                />
+              )}
             </Surface>
 
             {/* 4 Personal Metric Cards */}
