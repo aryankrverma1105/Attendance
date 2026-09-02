@@ -88,7 +88,7 @@ export function purgeOldSelfies(): { purgedCount: number; freedKb: number } {
         try {
           const remaining = fs.readdirSync(fullPath);
           if (remaining.length === 0) fs.rmdirSync(fullPath);
-        } catch {}
+        } catch { }
       } else if (entry.isFile()) {
         try {
           const stats = fs.statSync(fullPath);

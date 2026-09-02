@@ -141,16 +141,21 @@ function normalizeIdentifier(id: string): string {
   return id.trim().toLowerCase();
 }
 
-function buildPreviewSession(identifier: string, selectedRole?: FieldSession["role"], customDisplayName?: string): FieldSession {
+function buildPreviewSession(
+  identifier: string,
+  selectedRole?: FieldSession["role"],
+  customDisplayName?: string,
+): FieldSession {
   const trimmedIdentifier = identifier.trim();
   const digits = trimmedIdentifier.replace(/[^0-9]/g, "");
-  const isAdmin = digits.includes("9835916278") || trimmedIdentifier.toLowerCase().includes("admin") || selectedRole === "admin";
+  const isSuperAdminUser = digits.includes("9835916278");
+  const isAdmin = isSuperAdminUser || trimmedIdentifier.toLowerCase().includes("admin") || selectedRole === "admin";
   
   let displayName = customDisplayName;
   if (!displayName || displayName === "Field employee" || displayName === "Field Employee") {
-    if (isAdmin) displayName = "Aryan Kumar Verma";
+    if (isSuperAdminUser) displayName = "Aryan Kumar Verma";
     else if (trimmedIdentifier.includes("@")) displayName = trimmedIdentifier.split("@")[0];
-    else displayName = "Technician";
+    else displayName = isAdmin ? "Administrator" : "Technician";
   }
 
   const inferredRole = isAdmin ? "admin" : trimmedIdentifier.toLowerCase().includes("manager") || selectedRole === "manager" ? "manager" : "employee";
@@ -196,7 +201,7 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
           const key = normalizeIdentifier(u.identifier);
           if (!seen.has(key)) {
             seen.add(key);
-            const isAdm = key.includes("9835916278") || u.role === "admin";
+            const isAdm = key.includes("9835916278");
             dedupedUsers.push({
               ...u,
               identifier: key.startsWith("+91") ? key : u.identifier,
@@ -254,12 +259,28 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
     let resolvedRole = role;
 
     setData((current) => {
-      const existingUser = current.managedUsers.find((user) => normalizeIdentifier(user.identifier) === normalizedKey);
+      const cleanInput = identifier.trim().toLowerCase();
+      const inputDigits = cleanInput.replace(/[^0-9]/g, "");
+      const inputLast10 = inputDigits.length >= 10 ? inputDigits.slice(-10) : inputDigits;
+
+      // Find user by normalized key, 10-digit phone match, or name
+      const existingUser = current.managedUsers.find((user) => {
+        const uId = normalizeIdentifier(user.identifier);
+        const uDigits = (user.identifier || "").replace(/[^0-9]/g, "");
+        const uLast10 = uDigits.length >= 10 ? uDigits.slice(-10) : uDigits;
+        const uName = (user.displayName || "").toLowerCase().trim();
+
+        return (
+          uId === normalizedKey ||
+          (inputLast10 && uLast10 && inputLast10 === uLast10) ||
+          (cleanInput && uName === cleanInput) ||
+          (cleanInput && user.identifier.toLowerCase() === cleanInput)
+        );
+      });
+
       if (existingUser) {
-        if (!resolvedName && existingUser.displayName && existingUser.displayName !== "Field employee" && existingUser.displayName !== "Field Employee") {
-          resolvedName = existingUser.displayName;
-        }
-        if (!resolvedRole) resolvedRole = existingUser.role;
+        resolvedName = existingUser.displayName;
+        resolvedRole = existingUser.role; // Always preserve assigned role (admin/manager/employee)
       }
 
       const session = buildPreviewSession(identifier, resolvedRole, resolvedName);
@@ -267,8 +288,8 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
         id: existingUser ? existingUser.id : session.id,
         accountLinkId: existingUser ? existingUser.accountLinkId : `account-${session.id}`,
         displayName: resolvedName || session.displayName,
-        identifier: session.identifier,
-        role: session.role,
+        identifier: existingUser ? existingUser.identifier : session.identifier,
+        role: existingUser ? existingUser.role : (resolvedRole || session.role),
         status: existingUser ? existingUser.status : "active",
         dailyWage: existingUser ? existingUser.dailyWage : 0,
         createdAt: existingUser ? existingUser.createdAt : session.signedInAt,
@@ -276,7 +297,7 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
 
       const updatedUsers = existingUser
         ? current.managedUsers.map((user) =>
-            normalizeIdentifier(user.identifier) === normalizedKey
+            user.id === existingUser.id
               ? { ...user, displayName: workspaceUser.displayName, role: workspaceUser.role }
               : user
           )

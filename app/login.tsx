@@ -83,7 +83,20 @@ export default function LoginScreen() {
       }
 
       // Check Managed Users (Created by Admin)
-      const existingUser = data.managedUsers.find((u) => matchPhone(u.identifier, cleanPhone));
+      const inputClean = cleanPhone.toLowerCase().trim();
+      const inputDigits = cleanPhone.replace(/[^0-9]/g, "");
+      const inputLast10 = inputDigits.length >= 10 ? inputDigits.slice(-10) : inputDigits;
+
+      const existingUser = data.managedUsers.find((u) => {
+        const uDigits = (u.identifier || "").replace(/[^0-9]/g, "");
+        const uLast10 = uDigits.length >= 10 ? uDigits.slice(-10) : uDigits;
+        const uName = (u.displayName || "").toLowerCase().trim();
+        return (
+          matchPhone(u.identifier, cleanPhone) ||
+          (inputLast10 && uLast10 && inputLast10 === uLast10) ||
+          (inputClean && uName === inputClean)
+        );
+      });
 
       if (existingUser) {
         if ((existingUser.status as string) === "suspended" || (existingUser.status as string) === "removed") {
