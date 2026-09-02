@@ -15,7 +15,7 @@ export default function AttendanceCaptureScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ action?: "check-in" | "check-out" }>();
   const action = params.action === "check-out" ? "check-out" : "check-in";
-  const { captureAttendance } = useFieldData();
+  const { captureAttendance, data } = useFieldData();
   const cameraRef = useRef<CameraView>(null);
   const [permission, requestPermission] = useCameraPermissions();
   const [facing, setFacing] = useState<"front" | "back">("front");
@@ -104,15 +104,49 @@ export default function AttendanceCaptureScreen() {
     if (!cameraReady || !cameraRef.current) return;
     try {
       setIsCapturing(true);
-      setMessage("Capturing photo proof…");
-      const photo = await cameraRef.current.takePictureAsync({ quality: 0.6, base64: false, skipProcessing: true });
+      setMessage("Capturing compressed proof…");
+      // Ultra-compressed JPEG (quality 0.25) -> ~25 KB only!
+      const photo = await cameraRef.current.takePictureAsync({
+        quality: 0.25,
+        base64: true,
+        skipProcessing: false,
+      });
       if (!photo?.uri) throw new Error("Camera did not return a usable photo.");
       
       const location = await getVerifiedLocation();
       if (!location) return;
 
+      let finalPhotoUri = photo.uri;
+
+      // Upload directly to VM instance storage
+      if (photo.base64) {
+        try {
+          const apiBase = process.env.EXPO_PUBLIC_API_BASE_URL || "";
+          if (apiBase) {
+            const response = await fetch(`${apiBase}/api/upload-selfie`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                base64: photo.base64,
+                action,
+                employeeId: data.session?.id,
+              }),
+            });
+            const resData = await response.json();
+            if (resData?.url) {
+              finalPhotoUri = resData.url.startsWith("http") ? resData.url : `${apiBase}${resData.url}`;
+            }
+          } else {
+            finalPhotoUri = `data:image/jpeg;base64,${photo.base64}`;
+          }
+        } catch (uploadErr) {
+          console.warn("[Selfie] VM upload fallback to data URI:", uploadErr);
+          finalPhotoUri = `data:image/jpeg;base64,${photo.base64}`;
+        }
+      }
+
       setMessage(action === "check-in" ? "Check-in verified! Redirecting…" : "Check-out saved! Redirecting…");
-      await captureAttendance({ action, photoUri: photo.uri, location });
+      await captureAttendance({ action, photoUri: finalPhotoUri, location });
 
       // Automatically redirect straight to dashboard
       router.replace("/(tabs)");
