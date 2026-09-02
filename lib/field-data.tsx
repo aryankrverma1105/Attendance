@@ -166,6 +166,13 @@ function buildPreviewSession(identifier: string, selectedRole?: FieldSession["ro
   };
 }
 
+const persistWorkspaceToStorage = (workspace: Partial<FieldWorkspace>) => {
+  const { session, ...rest } = workspace;
+  AsyncStorage.setItem(FIELD_WORKSPACE_KEY, JSON.stringify(rest)).catch((e) =>
+    console.error("[Storage] Failed to save workspace:", e)
+  );
+};
+
 export function FieldDataProvider({ children }: { children: ReactNode }) {
   const [data, setData] = useState<FieldWorkspace>(emptyWorkspace);
   const [isHydrated, setIsHydrated] = useState(false);
@@ -176,16 +183,10 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
       if (active) setIsHydrated(true);
     }, 900);
 
-    Promise.all([
-      AsyncStorage.getItem(FIELD_WORKSPACE_KEY),
-      Platform.OS === "web"
-        ? Promise.resolve(typeof sessionStorage === "undefined" ? null : sessionStorage.getItem(FIELD_SESSION_KEY))
-        : SecureStore.getItemAsync(FIELD_SESSION_KEY),
-    ])
-      .then(([workspaceValue, sessionValue]) => {
+    AsyncStorage.getItem(FIELD_WORKSPACE_KEY)
+      .then((workspaceValue) => {
         if (!active) return;
         const parsedWorkspace = workspaceValue ? (JSON.parse(workspaceValue) as Partial<FieldWorkspace>) : {};
-        const parsedSession = sessionValue ? (JSON.parse(sessionValue) as FieldSession) : null;
         
         // Auto-deduplicate users by normalized phone/email
         const rawUsers = parsedWorkspace.managedUsers || [];
@@ -204,16 +205,32 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
           }
         }
 
-        // Sessions start fresh on app launch (requires login on each app open)
-        setData({ ...emptyWorkspace, ...parsedWorkspace, managedUsers: dedupedUsers, session: null });
-        if (Platform.OS === "web") {
-          if (typeof sessionStorage !== "undefined") sessionStorage.removeItem(FIELD_SESSION_KEY);
-        } else {
-          SecureStore.deleteItemAsync(FIELD_SESSION_KEY).catch(() => undefined);
+        // Always ensure Super Admin account is present
+        if (!seen.has("+919835916278")) {
+          dedupedUsers.unshift({
+            id: "admin-sologix-primary",
+            accountLinkId: "account-admin-sologix",
+            displayName: "Aryan Kumar Verma",
+            identifier: "+919835916278",
+            role: "admin",
+            status: "active",
+            dailyWage: 0,
+            createdAt: new Date().toISOString(),
+          });
         }
+
+        setData((current) => {
+          const mergedUsers = dedupedUsers.length > 0 ? dedupedUsers : current.managedUsers;
+          return {
+            ...emptyWorkspace,
+            ...parsedWorkspace,
+            managedUsers: mergedUsers,
+            session: null, // Require login on app launch
+          };
+        });
       })
-      .catch(() => {
-        if (active) setData(emptyWorkspace);
+      .catch((err) => {
+        console.error("[Storage] Hydration error:", err);
       })
       .finally(() => {
         clearTimeout(hydrationFallback);
@@ -228,21 +245,7 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!isHydrated) return;
-    const { session, ...workspace } = data;
-    AsyncStorage.setItem(FIELD_WORKSPACE_KEY, JSON.stringify(workspace)).catch(() => undefined);
-    if (Platform.OS === "web") {
-      if (typeof sessionStorage === "undefined") return;
-      if (session) sessionStorage.setItem(FIELD_SESSION_KEY, JSON.stringify(session));
-      else sessionStorage.removeItem(FIELD_SESSION_KEY);
-      return;
-    }
-    if (session) {
-      SecureStore.setItemAsync(FIELD_SESSION_KEY, JSON.stringify(session), {
-        keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
-      }).catch(() => undefined);
-    } else {
-      SecureStore.deleteItemAsync(FIELD_SESSION_KEY).catch(() => undefined);
-    }
+    persistWorkspaceToStorage(data);
   }, [data, isHydrated]);
 
   const signInToPreview = useCallback((identifier: string, role?: FieldSession["role"], customDisplayName?: string) => {
@@ -271,13 +274,22 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
         createdAt: existingUser ? existingUser.createdAt : session.signedInAt,
       };
 
-      return {
+      const updatedUsers = existingUser
+        ? current.managedUsers.map((user) =>
+            normalizeIdentifier(user.identifier) === normalizedKey
+              ? { ...user, displayName: workspaceUser.displayName, role: workspaceUser.role }
+              : user
+          )
+        : [workspaceUser, ...current.managedUsers];
+
+      const nextWorkspace: FieldWorkspace = {
         ...current,
         session,
-        managedUsers: existingUser
-          ? current.managedUsers.map((user) => normalizeIdentifier(user.identifier) === normalizedKey ? { ...user, displayName: workspaceUser.displayName, role: workspaceUser.role } : user)
-          : [workspaceUser, ...current.managedUsers],
+        managedUsers: updatedUsers,
       };
+
+      persistWorkspaceToStorage(nextWorkspace);
+      return nextWorkspace;
     });
   }, []);
 
@@ -312,12 +324,16 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
       occurredAt: createdAt,
       detail: "Linked account invitation created and queued for secure delivery.",
     };
-    setData((current) => ({
-      ...current,
-      managedUsers: [user, ...current.managedUsers],
-      accountEvents: [event, ...current.accountEvents],
-      offlineQueue: [queueOperation("account", `Account invitation for “${user.displayName}” awaiting secure sync`), ...current.offlineQueue],
-    }));
+    setData((current) => {
+      const nextWorkspace = {
+        ...current,
+        managedUsers: [user, ...current.managedUsers],
+        accountEvents: [event, ...current.accountEvents],
+        offlineQueue: [queueOperation("account", `Account invitation for “${user.displayName}” awaiting secure sync`), ...current.offlineQueue],
+      };
+      persistWorkspaceToStorage(nextWorkspace);
+      return nextWorkspace;
+    });
     return user.id;
   }, [data.session?.id, data.session?.role]);
 
@@ -334,12 +350,18 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
       occurredAt: issuedAt,
       detail: "Account access invitation issued and queued for secure OTP delivery.",
     };
-    setData((current) => ({
-      ...current,
-      managedUsers: current.managedUsers.map((user) => user.id === userId ? { ...user, status: "active", accessIssuedAt: issuedAt } : user),
-      accountEvents: [event, ...current.accountEvents],
-      offlineQueue: [queueOperation("account", `Account access for “${target.displayName}” awaiting secure delivery`), ...current.offlineQueue],
-    }));
+    setData((current) => {
+      const nextWorkspace = {
+        ...current,
+        managedUsers: current.managedUsers.map((user) =>
+          user.id === userId ? { ...user, status: "active" as const, accessIssuedAt: issuedAt } : user
+        ),
+        accountEvents: [event, ...current.accountEvents],
+        offlineQueue: [queueOperation("account", `Account access for “${target.displayName}” awaiting secure delivery`), ...current.offlineQueue],
+      };
+      persistWorkspaceToStorage(nextWorkspace);
+      return nextWorkspace;
+    });
     return true;
   }, [data.managedUsers, data.session?.id, data.session?.role]);
 
@@ -367,12 +389,16 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
       occurredAt: removedAt,
       detail: "Linked account removed from the active directory; retained work records remain audit-only.",
     };
-    setData((current) => ({
-      ...current,
-      managedUsers: current.managedUsers.filter((user) => user.id !== userId),
-      accountEvents: [event, ...current.accountEvents],
-      offlineQueue: [queueOperation("account", `Account removal for “${target.displayName}” awaiting secure sync`), ...current.offlineQueue],
-    }));
+    setData((current) => {
+      const nextWorkspace = {
+        ...current,
+        managedUsers: current.managedUsers.filter((user) => user.id !== userId),
+        accountEvents: [event, ...current.accountEvents],
+        offlineQueue: [queueOperation("account", `Account removal for “${target.displayName}” awaiting secure sync`), ...current.offlineQueue],
+      };
+      persistWorkspaceToStorage(nextWorkspace);
+      return nextWorkspace;
+    });
     return true;
   }, [data.managedUsers, data.session?.id, data.session?.identifier, data.session?.role]);
 
@@ -391,24 +417,28 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
       ? Math.max(0, Math.min(100000, Math.round(updates.dailyWage || 0)))
       : target.dailyWage;
 
-    setData((current) => ({
-      ...current,
-      managedUsers: current.managedUsers.map((user) =>
-        user.id === userId
-          ? {
-              ...user,
-              ...updates,
-              identifier: cleanPhone,
-              dailyWage: (updates.role || user.role) === "employee" ? validatedWage : 0,
-              displayName: updates.displayName?.trim() || user.displayName,
-            }
-          : user
-      ),
-      offlineQueue: [
-        queueOperation("account", `Updated account details for “${updates.displayName || target.displayName}”`),
-        ...current.offlineQueue,
-      ],
-    }));
+    setData((current) => {
+      const nextWorkspace = {
+        ...current,
+        managedUsers: current.managedUsers.map((user) =>
+          user.id === userId
+            ? {
+                ...user,
+                ...updates,
+                identifier: cleanPhone,
+                dailyWage: (updates.role || user.role) === "employee" ? validatedWage : 0,
+                displayName: updates.displayName?.trim() || user.displayName,
+              }
+            : user
+        ),
+        offlineQueue: [
+          queueOperation("account", `Updated account details for “${updates.displayName || target.displayName}”`),
+          ...current.offlineQueue,
+        ],
+      };
+      persistWorkspaceToStorage(nextWorkspace);
+      return nextWorkspace;
+    });
     return true;
   }, [data.managedUsers, data.session?.role]);
 
@@ -425,16 +455,20 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
     if (!allowed) return false;
 
     const validatedWage = Math.max(0, Math.min(100000, Math.round(newDailyWage || 0)));
-    setData((current) => ({
-      ...current,
-      managedUsers: current.managedUsers.map((user) =>
-        user.id === userId ? { ...user, dailyWage: validatedWage } : user
-      ),
-      offlineQueue: [
-        queueOperation("account", `Wage update for “${target.displayName}” (₹${validatedWage}/day) awaiting secure sync`),
-        ...current.offlineQueue,
-      ],
-    }));
+    setData((current) => {
+      const nextWorkspace = {
+        ...current,
+        managedUsers: current.managedUsers.map((user) =>
+          user.id === userId ? { ...user, dailyWage: validatedWage } : user
+        ),
+        offlineQueue: [
+          queueOperation("account", `Updated wage for “${target.displayName}” to ₹${validatedWage}/day`),
+          ...current.offlineQueue,
+        ],
+      };
+      persistWorkspaceToStorage(nextWorkspace);
+      return nextWorkspace;
+    });
     return true;
   }, [data.managedUsers, data.session?.id, data.session?.role]);
 
