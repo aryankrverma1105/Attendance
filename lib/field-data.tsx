@@ -204,7 +204,13 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
           }
         }
 
-        setData({ ...emptyWorkspace, ...parsedWorkspace, managedUsers: dedupedUsers, session: parsedSession });
+        // Sessions start fresh on app launch (requires login on each app open)
+        setData({ ...emptyWorkspace, ...parsedWorkspace, managedUsers: dedupedUsers, session: null });
+        if (Platform.OS === "web") {
+          if (typeof sessionStorage !== "undefined") sessionStorage.removeItem(FIELD_SESSION_KEY);
+        } else {
+          SecureStore.deleteItemAsync(FIELD_SESSION_KEY).catch(() => undefined);
+        }
       })
       .catch(() => {
         if (active) setData(emptyWorkspace);

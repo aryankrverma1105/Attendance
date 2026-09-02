@@ -3,8 +3,8 @@ import "react-native-reanimated";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Stack, useRouter, useSegments } from "expo-router";
 import { StatusBar } from "expo-status-bar";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { ActivityIndicator, Platform, StyleSheet, Text, View } from "react-native";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { ActivityIndicator, AppState, type AppStateStatus, Platform, StyleSheet, Text, View } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import {
   SafeAreaFrameContext,
@@ -24,20 +24,63 @@ import { getSessionRedirect } from "@/lib/session-routing";
 
 const DEFAULT_WEB_INSETS: EdgeInsets = { top: 0, right: 0, bottom: 0, left: 0 };
 const DEFAULT_WEB_FRAME: Rect = { x: 0, y: 0, width: 0, height: 0 };
+const INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
 export const unstable_settings = { anchor: "(tabs)" };
 
 function SessionGate({ children }: { children: ReactNode }) {
-  const { data, isHydrated } = useFieldData();
+  const { data, isHydrated, signOut } = useFieldData();
   const router = useRouter();
   const segments = useSegments();
   const onLoginScreen = segments[0] === "login";
+  const lastActiveRef = useRef<number>(Date.now());
 
+  const updateActivity = useCallback(() => {
+    lastActiveRef.current = Date.now();
+  }, []);
+
+  // 1. Session Redirect Gate
   useEffect(() => {
     if (!isHydrated) return;
     const redirect = getSessionRedirect({ hasSession: Boolean(data.session), onLoginScreen });
     if (redirect) router.replace(redirect);
   }, [data.session, isHydrated, onLoginScreen, router]);
+
+  // 2. 30-Minute Inactivity & Background Sleep Auto-Logout
+  useEffect(() => {
+    if (!data.session) return;
+
+    lastActiveRef.current = Date.now();
+
+    // Periodic inactivity interval check (every 15s)
+    const interval = setInterval(() => {
+      const elapsed = Date.now() - lastActiveRef.current;
+      if (elapsed >= INACTIVITY_TIMEOUT_MS) {
+        console.log("[Auth] Logging out user after 30 minutes of inactivity.");
+        signOut();
+      }
+    }, 15000);
+
+    // AppState change listener (handles background / app resume)
+    const subscription = AppState.addEventListener("change", (nextState: AppStateStatus) => {
+      if (nextState === "active") {
+        const elapsed = Date.now() - lastActiveRef.current;
+        if (elapsed >= INACTIVITY_TIMEOUT_MS) {
+          console.log("[Auth] Session expired during background sleep. Logging out.");
+          signOut();
+        } else {
+          lastActiveRef.current = Date.now();
+        }
+      } else if (nextState === "background" || nextState === "inactive") {
+        lastActiveRef.current = Date.now();
+      }
+    });
+
+    return () => {
+      clearInterval(interval);
+      subscription.remove();
+    };
+  }, [data.session, signOut]);
 
   if (!isHydrated) {
     return (
@@ -48,7 +91,11 @@ function SessionGate({ children }: { children: ReactNode }) {
     );
   }
 
-  return <>{children}</>;
+  return (
+    <View onTouchStart={updateActivity} style={{ flex: 1 }}>
+      {children}
+    </View>
+  );
 }
 
 export default function RootLayout() {
