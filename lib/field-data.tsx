@@ -31,6 +31,7 @@ import { canSetEmployeeWage } from "@/lib/field-access";
 import { startManagedRouteTracking, stopManagedRouteTracking, type TrackingStartResult } from "@/lib/tracking-service";
 import { shouldStartTrackingAfterAttendance } from "@/lib/tracking-policy";
 import { shouldEscalateTrackingPermission } from "@/lib/tracking-feedback";
+import { getApiBaseUrl } from "@/constants/oauth";
 
 export {
   calculateEarnings,
@@ -171,6 +172,37 @@ function buildPreviewSession(
   };
 }
 
+export async function syncUsersWithServer(usersToSync?: ManagedUser[]): Promise<ManagedUser[] | null> {
+  try {
+    const apiBase = getApiBaseUrl();
+    if (!apiBase) return null;
+
+    if (usersToSync && usersToSync.length > 0) {
+      const res = await fetch(`${apiBase}/api/users/sync`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ users: usersToSync }),
+      });
+      const resData = await res.json();
+      if (resData?.success && Array.isArray(resData?.users)) {
+        return resData.users as ManagedUser[];
+      }
+    } else {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 4000);
+      const res = await fetch(`${apiBase}/api/users`, { signal: controller.signal });
+      clearTimeout(timeout);
+      const resData = await res.json();
+      if (resData?.success && Array.isArray(resData?.users)) {
+        return resData.users as ManagedUser[];
+      }
+    }
+  } catch (err) {
+    console.warn("[UserSync] Server sync warning:", err);
+  }
+  return null;
+}
+
 const persistWorkspaceToStorage = (workspace: Partial<FieldWorkspace>) => {
   const { session, ...rest } = workspace;
   AsyncStorage.setItem(FIELD_WORKSPACE_KEY, JSON.stringify(rest)).catch((e) =>
@@ -233,6 +265,28 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
             session: null, // Require login on app launch
           };
         });
+
+        // Background server sync: fetch all accounts from VM server across all devices
+        syncUsersWithServer()
+          .then((serverUsers) => {
+            if (!active || !serverUsers || serverUsers.length === 0) return;
+            setData((prev) => {
+              const combined = [...prev.managedUsers];
+              for (const su of serverUsers) {
+                const suKey = normalizeIdentifier(su.identifier);
+                const idx = combined.findIndex((u) => normalizeIdentifier(u.identifier) === suKey);
+                if (idx >= 0) {
+                  combined[idx] = { ...combined[idx], ...su };
+                } else {
+                  combined.push(su);
+                }
+              }
+              const updated = { ...prev, managedUsers: combined };
+              persistWorkspaceToStorage(updated);
+              return updated;
+            });
+          })
+          .catch(() => {});
       })
       .catch((err) => {
         console.error("[Storage] Hydration error:", err);
@@ -355,6 +409,10 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
       persistWorkspaceToStorage(nextWorkspace);
       return nextWorkspace;
     });
+
+    // Broadcast newly created user to VM instance immediately so all other devices receive it
+    syncUsersWithServer([user]).catch((e) => console.warn("[UserSync] Push error:", e));
+
     return user.id;
   }, [data.session?.id, data.session?.role]);
 
@@ -420,6 +478,12 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
       persistWorkspaceToStorage(nextWorkspace);
       return nextWorkspace;
     });
+
+    const apiBase = getApiBaseUrl();
+    if (apiBase) {
+      fetch(`${apiBase}/api/users/${userId}`, { method: "DELETE" }).catch(() => {});
+    }
+
     return true;
   }, [data.managedUsers, data.session?.id, data.session?.identifier, data.session?.role]);
 
@@ -460,6 +524,16 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
       persistWorkspaceToStorage(nextWorkspace);
       return nextWorkspace;
     });
+
+    const updatedUser = {
+      ...target,
+      ...updates,
+      identifier: cleanPhone,
+      dailyWage: (updates.role || target.role) === "employee" ? validatedWage : 0,
+      displayName: updates.displayName?.trim() || target.displayName,
+    };
+    syncUsersWithServer([updatedUser as ManagedUser]).catch(() => {});
+
     return true;
   }, [data.managedUsers, data.session?.role]);
 

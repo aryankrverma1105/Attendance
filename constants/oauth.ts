@@ -46,10 +46,11 @@ export function getApiBaseUrl(): string {
     if (apiHostname !== hostname) {
       return `${protocol}//${apiHostname}`;
     }
+    return `${protocol}//${hostname}${port ? `:${port}` : ""}`;
   }
 
-  // Fallback to empty (will use relative URL)
-  return "";
+  // Native mobile default: point directly to the live GCP VM server on port 80
+  return "http://34.180.17.0";
 }
 
 export const SESSION_TOKEN_KEY = "app_session_token";

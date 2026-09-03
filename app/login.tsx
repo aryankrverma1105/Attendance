@@ -8,6 +8,7 @@ import { DepthOrb } from "@/components/depth-orb";
 import { FieldButton, StatusChip } from "@/components/field-ui";
 import { ScreenContainer } from "@/components/screen-container";
 import { useFieldData } from "@/lib/field-data";
+import { getApiBaseUrl } from "@/constants/oauth";
 import { trpc } from "@/lib/trpc";
 import type { FieldRole } from "@/lib/field-types";
 
@@ -26,7 +27,7 @@ function matchPhone(a?: string, b?: string): boolean {
 
 export default function LoginScreen() {
   const router = useRouter();
-  const { data, signInToPreview } = useFieldData();
+  const { data, signInToPreview, createManagedUser } = useFieldData();
   const [identifier, setIdentifier] = useState("");
   const [mode, setMode] = useState<"password" | "otp">("password");
   const [password, setPassword] = useState("");
@@ -87,7 +88,7 @@ export default function LoginScreen() {
       const inputDigits = cleanPhone.replace(/[^0-9]/g, "");
       const inputLast10 = inputDigits.length >= 10 ? inputDigits.slice(-10) : inputDigits;
 
-      const existingUser = data.managedUsers.find((u) => {
+      let existingUser = data.managedUsers.find((u) => {
         const uDigits = (u.identifier || "").replace(/[^0-9]/g, "");
         const uLast10 = uDigits.length >= 10 ? uDigits.slice(-10) : uDigits;
         const uName = (u.displayName || "").toLowerCase().trim();
@@ -97,6 +98,29 @@ export default function LoginScreen() {
           (inputClean && uName === inputClean)
         );
       });
+
+      // If not found in local cache on secondary device, query the VM server!
+      if (!existingUser) {
+        try {
+          const apiBase = getApiBaseUrl();
+          if (apiBase) {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 3500);
+            const checkRes = await fetch(`${apiBase}/api/users/check?phone=${encodeURIComponent(cleanPhone)}`, {
+              signal: controller.signal,
+            });
+            clearTimeout(timeout);
+            const checkData = await checkRes.json();
+            if (checkData?.found && checkData?.user) {
+              existingUser = checkData.user;
+              // Cache into local storage so future logins are instant
+              createManagedUser(checkData.user);
+            }
+          }
+        } catch (checkErr) {
+          console.warn("[Login] VM server check fallback:", checkErr);
+        }
+      }
 
       if (existingUser) {
         if ((existingUser.status as string) === "suspended" || (existingUser.status as string) === "removed") {
@@ -112,13 +136,13 @@ export default function LoginScreen() {
           }
         }
 
-        // Log in with assigned user role and actual display name
+        // Log in with assigned user role (Admin/Manager/Employee) and actual display name
         signInToPreview(existingUser.identifier, existingUser.role, existingUser.displayName);
         router.replace("/(tabs)");
         return;
       }
 
-      // If user is logging in on a new device/phone not yet cached in local storage
+      // If user is truly unknown, log in as employee
       signInToPreview(cleanPhone, "employee");
       router.replace("/(tabs)");
       return;
@@ -230,8 +254,21 @@ export default function LoginScreen() {
         if (isAdminAccount) {
           signInToPreview("+919835916278", "admin", "Aryan Kumar Verma");
         } else {
-          const existingUser = data.managedUsers.find((u) => matchPhone(u.identifier, identifier));
-          signInToPreview(existingUser ? existingUser.identifier : identifier.trim(), existingUser?.role || "employee", existingUser?.displayName);
+          let matched = data.managedUsers.find((u) => matchPhone(u.identifier, identifier));
+          if (!matched) {
+            try {
+              const apiBase = getApiBaseUrl();
+              if (apiBase) {
+                const checkRes = await fetch(`${apiBase}/api/users/check?phone=${encodeURIComponent(identifier.trim())}`);
+                const checkData = await checkRes.json();
+                if (checkData?.found && checkData?.user) {
+                  matched = checkData.user;
+                  createManagedUser(checkData.user);
+                }
+              }
+            } catch {}
+          }
+          signInToPreview(matched ? matched.identifier : identifier.trim(), matched?.role || "employee", matched?.displayName);
         }
         router.replace("/(tabs)");
         return;
