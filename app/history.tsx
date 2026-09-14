@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Alert, Image, Linking, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useRouter } from "expo-router";
 import MaterialIcons from "@expo/vector-icons/MaterialIcons";
@@ -6,6 +6,7 @@ import MaterialIcons from "@expo/vector-icons/MaterialIcons";
 import { SectionHeading, StatusChip, Surface } from "@/components/field-ui";
 import { ScreenContainer } from "@/components/screen-container";
 import { formatDay, formatTime, useFieldData } from "@/lib/field-data";
+import { trpc } from "@/lib/trpc";
 
 const openCoordinateMap = (latitude?: number, longitude?: number, label?: string) => {
   if (latitude === undefined || longitude === undefined) {
@@ -34,6 +35,31 @@ export default function AttendanceHistoryScreen() {
     accuracy?: number | null;
   } | null>(null);
 
+  const serverHistoryQuery = trpc.attendance.getHistory.useQuery(undefined, {
+    refetchInterval: 15000,
+  });
+
+  const displayAttendance = useMemo(() => {
+    if (serverHistoryQuery.data && serverHistoryQuery.data.length > 0) {
+      return serverHistoryQuery.data.map((r: any) => ({
+        id: r.id,
+        employeeId: String(r.userId),
+        checkInAt: r.checkInAt ? new Date(r.checkInAt).toISOString() : new Date().toISOString(),
+        checkOutAt: r.checkOutAt ? new Date(r.checkOutAt).toISOString() : undefined,
+        status: (r.status === "verified" ? "verified" : "review") as "verified" | "review",
+        checkInPhotoUri: r.checkInPhotoUri || undefined,
+        checkOutPhotoUri: r.checkOutPhotoUri || undefined,
+        checkInLocation: r.checkInLat && r.checkInLng ? {
+          latitude: parseFloat(r.checkInLat),
+          longitude: parseFloat(r.checkInLng),
+          accuracy: r.checkInAccuracy,
+        } : undefined,
+        checkOutLocation: undefined,
+      }));
+    }
+    return data.attendance;
+  }, [serverHistoryQuery.data, data.attendance]);
+
   return (
     <ScreenContainer containerClassName="bg-background" className="flex-1">
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
@@ -47,7 +73,7 @@ export default function AttendanceHistoryScreen() {
           </View>
         </View>
 
-        {data.attendance.length === 0 ? (
+        {displayAttendance.length === 0 ? (
           <Surface style={styles.empty}>
             <MaterialIcons color="#D97706" name="history" size={32} />
             <Text style={styles.emptyTitle}>No attendance records logged yet.</Text>
@@ -70,7 +96,7 @@ export default function AttendanceHistoryScreen() {
               title="Verified Shift Records"
             />
             <View style={styles.list}>
-              {data.attendance.map((record) => (
+              {displayAttendance.map((record) => (
                 <Surface key={record.id} style={styles.recordCard}>
                   <View style={styles.recordTop}>
                     <View>

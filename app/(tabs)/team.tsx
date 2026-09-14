@@ -13,6 +13,7 @@ import {
 import { ScreenContainer } from "@/components/screen-container";
 import { formatCurrency, formatDay, useFieldData } from "@/lib/field-data";
 import { hasPermission } from "@/lib/field-access";
+import { trpc } from "@/lib/trpc";
 import type { ManagedUser } from "@/lib/field-types";
 
 export default function ManagerTeamScreen() {
@@ -26,16 +27,37 @@ export default function ManagerTeamScreen() {
   const isAdmin = actorRole === "admin";
   const canAccessTeam = hasPermission(actorRole, "team.read.own");
 
+  const listUsersQuery = trpc.workforce.listUsers.useQuery(undefined, {
+    enabled: canAccessTeam,
+    refetchInterval: 15000,
+  });
+
   // Strictly filter for assigned team members if manager
   const teamMembers = useMemo(() => {
-    if (isAdmin) return data.managedUsers.filter((u) => u.role === "employee");
+    let sourceList: ManagedUser[] = data.managedUsers;
+    if (listUsersQuery.data && Array.isArray(listUsersQuery.data)) {
+      sourceList = listUsersQuery.data.map((u: any) => ({
+        id: String(u.id),
+        accountLinkId: `account-${u.id}`,
+        displayName: u.name || u.phoneE164 || "Field Worker",
+        identifier: u.phoneE164 || u.openId,
+        role: u.role,
+        status: u.accountStatus,
+        department: undefined,
+        dailyWage: u.dailyWage ?? 0,
+        managerId: u.managerId ? String(u.managerId) : undefined,
+        createdAt: u.createdAt ? new Date(u.createdAt).toISOString() : new Date().toISOString(),
+      }));
+    }
+
+    if (isAdmin) return sourceList.filter((u) => u.role === "employee");
     if (isManager) {
-      return data.managedUsers.filter(
+      return sourceList.filter(
         (u) => u.managerId === actorId || (!u.managerId && u.role === "employee")
       );
     }
     return [];
-  }, [data.managedUsers, isAdmin, isManager, actorId]);
+  }, [listUsersQuery.data, data.managedUsers, isAdmin, isManager, actorId]);
 
   const visibleTeam = useMemo(() => {
     return teamMembers.filter((emp) =>

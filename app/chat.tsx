@@ -1,22 +1,76 @@
-import { useMemo, useState } from "react";
-import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { useEffect, useMemo, useState } from "react";
+import { ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useRouter } from "expo-router";
 import MaterialIcons from "@expo/vector-icons/MaterialIcons";
 
 import { FieldButton, StatusChip, Surface } from "@/components/field-ui";
 import { ScreenContainer } from "@/components/screen-container";
 import { formatTime, useFieldData } from "@/lib/field-data";
+import { trpc } from "@/lib/trpc";
+import { enqueueOperation } from "@/lib/offline-sync";
 
 export default function ChatScreen() {
   const router = useRouter();
   const { data, sendMessage } = useFieldData();
   const [message, setMessage] = useState("");
-  const sortedMessages = useMemo(() => [...data.messages].sort((a, b) => a.createdAt.localeCompare(b.createdAt)), [data.messages]);
+  const [channelId, setChannelId] = useState<string | null>(null);
 
-  const submit = () => {
-    if (!message.trim()) return;
-    sendMessage(message);
+  // Target manager ID (default to 1 or assigned manager)
+  const managerUserId = data.session?.managerId ? parseInt(data.session.managerId, 10) || 1 : 1;
+
+  // Resolve or create channel on backend
+  const getChannelMutation = trpc.chat.getOrCreateChannel.useMutation();
+  const sendMessageMutation = trpc.chat.sendMessage.useMutation();
+
+  useEffect(() => {
+    getChannelMutation
+      .mutateAsync({ targetUserId: managerUserId })
+      .then((ch) => {
+        if (ch?.id) setChannelId(ch.id);
+      })
+      .catch((err) => {
+        console.warn("[Chat] Channel resolution warning:", err);
+      });
+  }, [managerUserId]);
+
+  const messagesQuery = trpc.chat.getMessages.useQuery(
+    { channelId: channelId || "default-chan" },
+    { enabled: !!channelId, refetchInterval: 6000 }
+  );
+
+  // Merge server messages with local messages
+  const sortedMessages = useMemo(() => {
+    if (messagesQuery.data && messagesQuery.data.length > 0) {
+      return [...messagesQuery.data].map((m) => ({
+        id: m.id,
+        text: m.message,
+        sender: (String(m.senderUserId) === String(data.session?.id) ? "employee" : "manager") as "employee" | "manager",
+        createdAt: m.createdAt instanceof Date ? m.createdAt.toISOString() : String(m.createdAt),
+        delivery: (m.status === "delivered" || m.status === "read" ? "delivered" : "pending") as "delivered" | "pending",
+      }));
+    }
+    return [...data.messages].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }, [messagesQuery.data, data.messages, data.session?.id]);
+
+  const submit = async () => {
+    const text = message.trim();
+    if (!text) return;
+
     setMessage("");
+    // Optimistic UI update
+    sendMessage(text);
+
+    if (channelId) {
+      try {
+        await sendMessageMutation.mutateAsync({ channelId, message: text });
+        await messagesQuery.refetch();
+      } catch (err) {
+        console.warn("[Chat] Message send failed, queued offline:", err);
+        await enqueueOperation("CHAT_MESSAGE", { channelId, text }, "high");
+      }
+    } else {
+      await enqueueOperation("CHAT_MESSAGE", { text }, "normal");
+    }
   };
 
   return <ScreenContainer edges={["top", "bottom", "left", "right"]} containerClassName="bg-background" className="flex-1"><KeyboardAvoidingView behavior={Platform.select({ ios: "padding", default: undefined })} style={styles.flex}><View style={styles.header}><Pressable onPress={() => router.back()} style={styles.back}><MaterialIcons color="#547087" name="arrow-back" size={22} /></Pressable><View style={styles.managerAvatar}><Text style={styles.managerInitial}>M</Text></View><View style={{ flex: 1 }}><Text style={styles.name}>Field manager</Text><View style={styles.onlineRow}><View style={styles.onlineDot} /><Text style={styles.onlineText}>Secure team channel</Text></View></View><Pressable style={styles.more}><MaterialIcons color="#547087" name="more-vert" size={21} /></Pressable></View><ScrollView contentContainerStyle={styles.messages} showsVerticalScrollIndicator={false}>{sortedMessages.length === 0 ? <Surface style={styles.empty}><MaterialIcons color="#8774C8" name="forum" size={31} /><Text style={styles.emptyTitle}>Start a manager conversation.</Text><Text style={styles.emptyBody}>Messages are saved locally and placed in the secure sync queue until the team service is configured.</Text></Surface> : sortedMessages.map((item) => <View key={item.id} style={[styles.bubbleRow, item.sender === "employee" && styles.employeeRow]}>{item.sender === "manager" ? <View style={styles.smallAvatar}><Text style={styles.smallAvatarText}>M</Text></View> : null}<View style={[styles.bubble, item.sender === "employee" ? styles.employeeBubble : styles.managerBubble]}><Text style={[styles.messageText, item.sender === "employee" && styles.employeeMessageText]}>{item.text}</Text><View style={styles.metaRow}><Text style={[styles.messageMeta, item.sender === "employee" && styles.employeeMeta]}>{formatTime(item.createdAt)}</Text>{item.sender === "employee" ? <StatusChip label={item.delivery === "delivered" ? "Delivered" : "Queued"} tone={item.delivery === "delivered" ? "success" : "warning"} /> : null}</View></View></View>)}</ScrollView><View style={styles.composer}><TextInput multiline onChangeText={setMessage} placeholder="Message your manager…" placeholderTextColor="#7E96A9" style={styles.messageInput} value={message} /><Pressable onPress={submit} style={({ pressed }) => [styles.send, pressed && styles.pressed]}><MaterialIcons color="#17354A" name="send" size={20} /></Pressable></View></KeyboardAvoidingView></ScreenContainer>;

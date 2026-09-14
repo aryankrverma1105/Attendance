@@ -1,26 +1,69 @@
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { useMemo } from "react";
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useRouter } from "expo-router";
 import MaterialIcons from "@expo/vector-icons/MaterialIcons";
 
 import { FieldButton, SectionHeading, StatusChip, Surface } from "@/components/field-ui";
 import { ScreenContainer } from "@/components/screen-container";
 import { formatDay, formatTime, getDayKey, useFieldData } from "@/lib/field-data";
+import { trpc } from "@/lib/trpc";
 
 export default function VisitsScreen() {
   const router = useRouter();
   const { data } = useFieldData();
-  const todaysVisits = data.visits.filter((visit) => getDayKey(visit.scheduledFor) === getDayKey(new Date()));
-  const upcomingVisits = data.visits.filter((visit) => getDayKey(visit.scheduledFor) !== getDayKey(new Date()));
 
-  const visitCard = (visit: (typeof data.visits)[number]) => {
+  // Server Visits Query
+  const visitsQuery = trpc.visits.list.useQuery(undefined, {
+    retry: 1,
+    refetchOnWindowFocus: false,
+  });
+
+  // Merge server visits with local offline visits
+  const allVisits = useMemo(() => {
+    const list = [...(visitsQuery.data || [])];
+    const existingIds = new Set(list.map((v) => v.id));
+    for (const lv of data.visits) {
+      if (!existingIds.has(lv.id)) {
+        list.push({
+          id: lv.id,
+          customerId: lv.customerId,
+          employeeUserId: 0,
+          scheduledFor: new Date(lv.scheduledFor),
+          status: lv.status === "completed" ? "COMPLETED" : lv.status === "checked-in" ? "IN_PROGRESS" : "SCHEDULED",
+          checkInAt: lv.checkInAt ? new Date(lv.checkInAt) : null,
+          checkOutAt: lv.checkOutAt ? new Date(lv.checkOutAt) : null,
+          checkInLat: null,
+          checkInLng: null,
+          checkOutLat: null,
+          checkOutLng: null,
+          meetingOutcome: lv.meetingOutcome || null,
+          notes: lv.notes || null,
+          followUpDate: lv.followUpDate || null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          customerName: data.customers.find((c) => c.id === lv.customerId)?.name || "Customer",
+        });
+      }
+    }
+    return list;
+  }, [visitsQuery.data, data.visits, data.customers]);
+
+  const todayStr = getDayKey(new Date().toISOString());
+  const toIso = (d: Date | string) => (d instanceof Date ? d.toISOString() : String(d));
+  const todaysVisits = allVisits.filter((visit) => getDayKey(toIso(visit.scheduledFor)) === todayStr);
+  const upcomingVisits = allVisits.filter((visit) => getDayKey(toIso(visit.scheduledFor)) !== todayStr);
+
+  const visitCard = (visit: (typeof allVisits)[number]) => {
     const customer = data.customers.find((item) => item.id === visit.customerId);
-    const status = visit.status === "completed" ? "Completed" : visit.status === "checked-in" ? "At customer" : "Scheduled";
-    const tone = visit.status === "completed" ? "success" : visit.status === "checked-in" ? "warning" : "neutral";
+    const customerName = visit.customerName || customer?.name || "Customer";
+    const statusText = visit.status === "COMPLETED" ? "Completed" : visit.status === "IN_PROGRESS" ? "At customer" : "Scheduled";
+    const tone = visit.status === "COMPLETED" ? "success" : visit.status === "IN_PROGRESS" ? "warning" : "neutral";
+
     return (
       <Pressable key={visit.id} onPress={() => router.push({ pathname: "/visit-detail", params: { id: visit.id } })} style={({ pressed }) => [styles.visitPressable, pressed && styles.pressed]}>
         <Surface style={styles.visitCard}>
-          <View style={styles.timeColumn}><Text style={styles.time}>{formatTime(visit.scheduledFor)}</Text><View style={styles.line} /></View>
-          <View style={styles.visitCopy}><View style={styles.visitTop}><View style={{ flex: 1 }}><Text style={styles.visitName}>{customer?.name ?? "Customer is awaiting sync"}</Text><Text style={styles.visitAddress}>{customer?.address ?? "Address pending"}</Text></View><StatusChip label={status} tone={tone} /></View><Text style={styles.visitDetails}>{visit.meetingOutcome ? `Outcome: ${visit.meetingOutcome}` : visit.status === "scheduled" ? "Open to check in with photo and GPS proof." : "Finish the report, follow-up, and evidence capture."}</Text></View>
+          <View style={styles.timeColumn}><Text style={styles.time}>{formatTime(toIso(visit.scheduledFor))}</Text><View style={styles.line} /></View>
+          <View style={styles.visitCopy}><View style={styles.visitTop}><View style={{ flex: 1 }}><Text style={styles.visitName}>{customerName}</Text><Text style={styles.visitAddress}>{customer?.address ?? "Verified site appointment"}</Text></View><StatusChip label={statusText} tone={tone} /></View><Text style={styles.visitDetails}>{visit.meetingOutcome ? `Outcome: ${visit.meetingOutcome}` : visit.status === "SCHEDULED" ? "Open to check in with photo and GPS proof." : "Finish the report, follow-up, and evidence capture."}</Text></View>
         </Surface>
       </Pressable>
     );

@@ -6,6 +6,7 @@ import MaterialIcons from "@expo/vector-icons/MaterialIcons";
 import { FieldButton, Surface } from "@/components/field-ui";
 import { ScreenContainer } from "@/components/screen-container";
 import { useFieldData } from "@/lib/field-data";
+import { trpc } from "@/lib/trpc";
 
 export default function VisitPlanScreen() {
   const router = useRouter();
@@ -14,7 +15,9 @@ export default function VisitPlanScreen() {
   const [dateText, setDateText] = useState(new Date().toISOString().slice(0, 16));
   const selectedCustomer = useMemo(() => data.customers.find((customer) => customer.id === selectedCustomerId), [data.customers, selectedCustomerId]);
 
-  const planVisit = () => {
+  const createVisitMutation = trpc.visits.create.useMutation();
+
+  const planVisit = async () => {
     if (!selectedCustomerId) {
       Alert.alert("Choose a customer", "Add or select a customer before creating a visit.");
       return;
@@ -24,8 +27,21 @@ export default function VisitPlanScreen() {
       Alert.alert("Date format needed", "Use a valid ISO date such as 2026-08-21T14:30.");
       return;
     }
-    const id = createVisit({ customerId: selectedCustomerId, scheduledFor: parsedDate.toISOString() });
-    router.replace({ pathname: "/visit-detail", params: { id } });
+
+    try {
+      const serverVisit = await createVisitMutation.mutateAsync({
+        customerId: selectedCustomerId,
+        scheduledFor: parsedDate.toISOString(),
+      });
+      createVisit({ customerId: selectedCustomerId, scheduledFor: parsedDate.toISOString() });
+      router.replace({ pathname: "/visit-detail", params: { id: serverVisit.id } });
+    } catch (err) {
+      console.warn("[Visits] Server creation failed, queuing offline:", err);
+      const { enqueueOperation } = await import("@/lib/offline-sync");
+      await enqueueOperation("VISIT_CREATE", { customerId: selectedCustomerId, scheduledFor: parsedDate.toISOString() });
+      const localId = createVisit({ customerId: selectedCustomerId, scheduledFor: parsedDate.toISOString() });
+      router.replace({ pathname: "/visit-detail", params: { id: localId } });
+    }
   };
 
   return (

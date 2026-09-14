@@ -21,6 +21,7 @@ import { initManusRuntime, subscribeSafeAreaInsets } from "@/lib/_core/manus-run
 import "@/lib/location-tracking";
 import "@/lib/_core/nativewind-pressable";
 import { getSessionRedirect } from "@/lib/session-routing";
+import { registerForPushNotificationsAsync, setupNotificationListeners } from "@/lib/push-notifications";
 
 const DEFAULT_WEB_INSETS: EdgeInsets = { top: 0, right: 0, bottom: 0, left: 0 };
 const DEFAULT_WEB_FRAME: Rect = { x: 0, y: 0, width: 0, height: 0 };
@@ -81,6 +82,22 @@ function SessionGate({ children }: { children: ReactNode }) {
       subscription.remove();
     };
   }, [data.session, signOut]);
+
+  // 3. Push notifications registration & deep-linking listener
+  useEffect(() => {
+    if (!data.session) return;
+
+    registerForPushNotificationsAsync().then((token) => {
+      if (token) {
+        console.log("[Push] Registered Expo Push Token for user:", token);
+      }
+    });
+
+    const cleanup = setupNotificationListeners();
+    return () => {
+      cleanup();
+    };
+  }, [data.session]);
 
   if (!isHydrated) {
     return (

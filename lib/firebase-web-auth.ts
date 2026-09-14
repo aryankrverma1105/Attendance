@@ -64,11 +64,21 @@ export async function requestWebPhoneOtp(phoneNumber: string): Promise<any> {
     throw new Error("Firebase Authentication could not be loaded in this browser.");
   }
 
-  // Ensure DOM anchor element exists for invisible reCAPTCHA
+  // Set persistence to LOCAL so session state is stored in localStorage instead of volatile/partitioned sessionStorage
+  try {
+    if (firebase.auth.Auth?.Persistence?.LOCAL) {
+      await firebase.auth().setPersistence(firebase.auth.Auth.Persistence.LOCAL);
+    }
+  } catch (persistErr) {
+    console.warn("[Firebase Web Auth] Could not set LOCAL persistence:", persistErr);
+  }
+
+  // Ensure DOM anchor element exists for reCAPTCHA
   let container = document.getElementById("recaptcha-container");
   if (!container) {
     container = document.createElement("div");
     container.id = "recaptcha-container";
+    container.style.marginTop = "8px";
     document.body.appendChild(container);
   }
 
@@ -81,18 +91,40 @@ export async function requestWebPhoneOtp(phoneNumber: string): Promise<any> {
     win.recaptchaVerifier = undefined;
   }
 
-  win.recaptchaVerifier = new firebase.auth.RecaptchaVerifier("recaptcha-container", {
-    size: "invisible",
-    callback: () => {
-      // reCAPTCHA verified
-    },
-    "expired-callback": () => {
-      try {
-        win.recaptchaVerifier?.clear();
-      } catch {}
-      win.recaptchaVerifier = undefined;
-    },
-  });
+  try {
+    win.recaptchaVerifier = new firebase.auth.RecaptchaVerifier("recaptcha-container", {
+      size: "invisible",
+      callback: () => {
+        // reCAPTCHA verified successfully
+      },
+      "expired-callback": () => {
+        try {
+          win.recaptchaVerifier?.clear();
+        } catch {}
+        win.recaptchaVerifier = undefined;
+      },
+    });
 
-  return await firebase.auth().signInWithPhoneNumber(phoneNumber, win.recaptchaVerifier);
+    return await firebase.auth().signInWithPhoneNumber(phoneNumber, win.recaptchaVerifier);
+  } catch (err: any) {
+    // If invisible reCAPTCHA fails due to storage partitioning, try visible reCAPTCHA fallback
+    const errMsg = err?.message || String(err);
+    if (errMsg.includes("missing-initial-state") || errMsg.includes("sessionStorage") || errMsg.includes("storage-partitioned")) {
+      console.warn("[Firebase Web Auth] Invisible reCAPTCHA blocked by storage partitioning. Attempting visible reCAPTCHA fallback...");
+      try {
+        if (win.recaptchaVerifier) {
+          try { win.recaptchaVerifier.clear(); } catch {}
+          win.recaptchaVerifier = undefined;
+        }
+        win.recaptchaVerifier = new firebase.auth.RecaptchaVerifier("recaptcha-container", {
+          size: "normal",
+        });
+        await win.recaptchaVerifier.render();
+        return await firebase.auth().signInWithPhoneNumber(phoneNumber, win.recaptchaVerifier);
+      } catch (fallbackErr) {
+        throw fallbackErr;
+      }
+    }
+    throw err;
+  }
 }

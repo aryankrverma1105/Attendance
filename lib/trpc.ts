@@ -1,42 +1,53 @@
 import { createTRPCReact } from "@trpc/react-query";
-import { httpBatchLink } from "@trpc/client";
+import { httpBatchLink, createTRPCProxyClient } from "@trpc/client";
 import superjson from "superjson";
 import type { AppRouter } from "@/server/routers";
 import { getApiBaseUrl } from "@/constants/oauth";
 import * as Auth from "@/lib/_core/auth";
 
 /**
- * tRPC React client for type-safe API calls.
- *
- * IMPORTANT (tRPC v11): The `transformer` must be inside `httpBatchLink`,
- * NOT at the root createClient level. This ensures client and server
- * use the same serialization format (superjson).
+ * tRPC React client for type-safe API calls in hooks.
  */
 export const trpc = createTRPCReact<AppRouter>();
 
 /**
- * Creates the tRPC client with proper configuration.
- * Call this once in your app's root layout.
+ * Creates client links with dynamic authentication and base URL resolution.
+ */
+export function getTRPCClientLinks() {
+  return [
+    httpBatchLink({
+      url: `${getApiBaseUrl()}/api/trpc`,
+      transformer: superjson,
+      async headers() {
+        try {
+          const token = await Auth.getSessionToken();
+          return token ? { Authorization: `Bearer ${token}` } : {};
+        } catch {
+          return {};
+        }
+      },
+      fetch(url, options) {
+        return fetch(url, {
+          ...options,
+          credentials: "include",
+        });
+      },
+    }),
+  ];
+}
+
+/**
+ * Creates the tRPC React Query client for app root provider.
  */
 export function createTRPCClient() {
   return trpc.createClient({
-    links: [
-      httpBatchLink({
-        url: `${getApiBaseUrl()}/api/trpc`,
-        // tRPC v11: transformer MUST be inside httpBatchLink, not at root
-        transformer: superjson,
-        async headers() {
-          const token = await Auth.getSessionToken();
-          return token ? { Authorization: `Bearer ${token}` } : {};
-        },
-        // Custom fetch to include credentials for cookie-based auth
-        fetch(url, options) {
-          return fetch(url, {
-            ...options,
-            credentials: "include",
-          });
-        },
-      }),
-    ],
+    links: getTRPCClientLinks(),
   });
 }
+
+/**
+ * Vanilla tRPC proxy client for imperative calls (outside React components, background sync, etc.).
+ */
+export const trpcClient = createTRPCProxyClient<AppRouter>({
+  links: getTRPCClientLinks(),
+});

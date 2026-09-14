@@ -24,6 +24,7 @@ export const users = mysqlTable("users", {
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
   lastSignedIn: timestamp("lastSignedIn").defaultNow().notNull(),
+  sessionVersion: int("sessionVersion").default(1).notNull(),
 });
 
 export type User = typeof users.$inferSelect;
@@ -170,3 +171,166 @@ export const gpsPoints = mysqlTable("gps_points", {
 
 export type DbGpsPoint = typeof gpsPoints.$inferSelect;
 export type InsertDbGpsPoint = typeof gpsPoints.$inferInsert;
+
+/**
+ * Customers and client locations managed across the workforce.
+ */
+export const customers = mysqlTable("customers", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  name: varchar("name", { length: 255 }).notNull(),
+  phone: varchar("phone", { length: 32 }),
+  email: varchar("email", { length: 320 }),
+  address: text("address"),
+  latitude: varchar("latitude", { length: 32 }),
+  longitude: varchar("longitude", { length: 32 }),
+  notes: text("notes"),
+  createdByUserId: int("createdByUserId").references(() => users.id),
+  status: mysqlEnum("status", ["active", "archived"]).default("active").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+export type DbCustomer = typeof customers.$inferSelect;
+export type InsertDbCustomer = typeof customers.$inferInsert;
+
+/**
+ * Customer visits and field appointments with evidence.
+ */
+export const visits = mysqlTable("visits", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  customerId: varchar("customerId", { length: 36 })
+    .references(() => customers.id)
+    .notNull(),
+  employeeUserId: int("employeeUserId")
+    .references(() => users.id)
+    .notNull(),
+  scheduledFor: timestamp("scheduledFor").notNull(),
+  status: mysqlEnum("status", ["SCHEDULED", "IN_PROGRESS", "COMPLETED", "CANCELLED"]).default("SCHEDULED").notNull(),
+  checkInAt: timestamp("checkInAt"),
+  checkOutAt: timestamp("checkOutAt"),
+  checkInLat: varchar("checkInLat", { length: 32 }),
+  checkInLng: varchar("checkInLng", { length: 32 }),
+  checkOutLat: varchar("checkOutLat", { length: 32 }),
+  checkOutLng: varchar("checkOutLng", { length: 32 }),
+  meetingOutcome: text("meetingOutcome"),
+  notes: text("notes"),
+  followUpDate: varchar("followUpDate", { length: 32 }),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+export type DbVisit = typeof visits.$inferSelect;
+export type InsertDbVisit = typeof visits.$inferInsert;
+
+/**
+ * Evidence photos and geotags captured during customer visits.
+ */
+export const visitEvidence = mysqlTable("visit_evidence", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  visitId: varchar("visitId", { length: 36 })
+    .references(() => visits.id)
+    .notNull(),
+  evidenceUrl: text("evidenceUrl").notNull(),
+  latitude: varchar("latitude", { length: 32 }),
+  longitude: varchar("longitude", { length: 32 }),
+  capturedAt: timestamp("capturedAt").defaultNow().notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+export type DbVisitEvidence = typeof visitEvidence.$inferSelect;
+export type InsertDbVisitEvidence = typeof visitEvidence.$inferInsert;
+
+/**
+ * Direct and team chat channels between managers and field workers.
+ */
+export const chatChannels = mysqlTable("chat_channels", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  name: varchar("name", { length: 255 }),
+  type: mysqlEnum("type", ["direct", "team"]).default("direct").notNull(),
+  managerUserId: int("managerUserId").references(() => users.id),
+  employeeUserId: int("employeeUserId").references(() => users.id),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+export type DbChatChannel = typeof chatChannels.$inferSelect;
+export type InsertDbChatChannel = typeof chatChannels.$inferInsert;
+
+/**
+ * Individual chat messages stored authoritatively in MySQL.
+ */
+export const chatMessages = mysqlTable("chat_messages", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  channelId: varchar("channelId", { length: 36 })
+    .references(() => chatChannels.id)
+    .notNull(),
+  senderUserId: int("senderUserId")
+    .references(() => users.id)
+    .notNull(),
+  message: text("message").notNull(),
+  status: mysqlEnum("status", ["sent", "delivered", "read"]).default("sent").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+export type DbChatMessage = typeof chatMessages.$inferSelect;
+export type InsertDbChatMessage = typeof chatMessages.$inferInsert;
+
+/**
+ * Field expense claims and approvals.
+ */
+export const expenses = mysqlTable("expenses", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  employeeUserId: int("employeeUserId")
+    .references(() => users.id)
+    .notNull(),
+  amount: int("amount").notNull(), // Amount in INR (₹)
+  category: varchar("category", { length: 64 }).notNull(),
+  description: text("description"),
+  receiptUrl: text("receiptUrl"),
+  expenseDate: varchar("expenseDate", { length: 10 }).notNull(), // YYYY-MM-DD
+  status: mysqlEnum("status", ["DRAFT", "SUBMITTED", "APPROVED", "REJECTED"]).default("SUBMITTED").notNull(),
+  approvedByUserId: int("approvedByUserId").references(() => users.id),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+export type DbExpense = typeof expenses.$inferSelect;
+export type InsertDbExpense = typeof expenses.$inferInsert;
+
+/**
+ * Device tokens and active sessions for push notifications and device tracking.
+ */
+export const deviceSessions = mysqlTable("device_sessions", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  userId: int("userId")
+    .references(() => users.id)
+    .notNull(),
+  expoPushToken: varchar("expoPushToken", { length: 255 }),
+  deviceModel: varchar("deviceModel", { length: 128 }),
+  osVersion: varchar("osVersion", { length: 64 }),
+  appVersion: varchar("appVersion", { length: 32 }),
+  lastActiveAt: timestamp("lastActiveAt").defaultNow().notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+export type DbDeviceSession = typeof deviceSessions.$inferSelect;
+export type InsertDbDeviceSession = typeof deviceSessions.$inferInsert;
+
+/**
+ * Persistent notifications sent to employees and managers.
+ */
+export const notifications = mysqlTable("notifications", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  recipientUserId: int("recipientUserId")
+    .references(() => users.id)
+    .notNull(),
+  title: varchar("title", { length: 255 }).notNull(),
+  body: text("body").notNull(),
+  type: varchar("type", { length: 64 }).default("general").notNull(),
+  dataJson: text("dataJson"),
+  read: int("read").default(0).notNull(), // 0: unread, 1: read
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+export type DbNotification = typeof notifications.$inferSelect;
+export type InsertDbNotification = typeof notifications.$inferInsert;
+

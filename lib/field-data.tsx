@@ -8,6 +8,7 @@ import type {
   AttendanceRecord,
   ChatMessage,
   Customer,
+  FieldRole,
   FieldSession,
   FieldWorkspace,
   LocationEvidence,
@@ -82,12 +83,13 @@ type FieldDataContextValue = {
   data: FieldWorkspace;
   isHydrated: boolean;
   signInToPreview: (identifier: string, role?: FieldSession["role"], displayName?: string) => void;
+  setServerSession: (serverUser: any, token?: string) => void;
   signOut: () => void;
-  createManagedUser: (input: Omit<ManagedUser, "id" | "accountLinkId" | "status" | "createdAt" | "accessIssuedAt">) => string;
+  createManagedUser: (input: Omit<ManagedUser, "id" | "accountLinkId" | "status" | "createdAt" | "accessIssuedAt">) => Promise<string>;
   issueManagedUserAccess: (userId: string) => boolean;
-  removeManagedUser: (userId: string) => boolean;
-  updateManagedUser: (userId: string, updates: Partial<Omit<ManagedUser, "id" | "createdAt">>) => boolean;
-  updateEmployeeWage: (userId: string, newDailyWage: number) => boolean;
+  removeManagedUser: (userId: string) => Promise<boolean>;
+  updateManagedUser: (userId: string, updates: Partial<Omit<ManagedUser, "id" | "createdAt">>) => Promise<boolean>;
+  updateEmployeeWage: (userId: string, newDailyWage: number) => Promise<boolean>;
   createTask: (input: {
     title: string;
     description?: string;
@@ -97,15 +99,15 @@ type FieldDataContextValue = {
     priority: "LOW" | "MEDIUM" | "HIGH" | "URGENT";
     locationAddress?: string;
     customerName?: string;
-  }) => string;
-  updateTaskStatus: (taskId: string, newStatus: "PENDING" | "IN_PROGRESS" | "COMPLETED") => void;
+  }) => Promise<string>;
+  updateTaskStatus: (taskId: string, newStatus: "PENDING" | "IN_PROGRESS" | "COMPLETED") => Promise<void>;
   captureAttendance: (input: AttendanceCaptureInput) => Promise<AttendanceCaptureResult>;
   captureVisitEvidence: (input: VisitCaptureInput) => void;
   addCustomer: (input: Omit<Customer, "id" | "createdAt">) => string;
   createVisit: (input: Omit<Visit, "id" | "status" | "checkInAt" | "checkOutAt" | "checkInLocation" | "checkOutLocation" | "evidenceUris" | "meetingOutcome" | "notes" | "followUpDate">) => string;
   updateVisit: (visitId: string, input: Pick<Visit, "meetingOutcome" | "notes" | "followUpDate">) => void;
   sendMessage: (text: string) => void;
-  addRoutePoint: (point: LocationEvidence) => void;
+  addRoutePoint: (point: LocationEvidence) => Promise<void> | void;
   startRouteTracking: () => Promise<TrackingStartResult>;
   stopRouteTracking: () => Promise<void>;
   setTrackingActive: (active: boolean) => void;
@@ -151,15 +153,16 @@ function buildPreviewSession(
   const digits = trimmedIdentifier.replace(/[^0-9]/g, "");
   const isSuperAdminUser = digits.includes("9835916278");
   const isAdmin = isSuperAdminUser || trimmedIdentifier.toLowerCase().includes("admin") || selectedRole === "admin";
+  const isManager = !isAdmin && (trimmedIdentifier.toLowerCase().includes("manager") || selectedRole === "manager");
   
   let displayName = customDisplayName;
   if (!displayName || displayName === "Field employee" || displayName === "Field Employee") {
     if (isSuperAdminUser) displayName = "Aryan Kumar Verma";
     else if (trimmedIdentifier.includes("@")) displayName = trimmedIdentifier.split("@")[0];
-    else displayName = isAdmin ? "Administrator" : "Technician";
+    else displayName = isAdmin ? "Administrator" : isManager ? "Field Manager" : "Technician";
   }
 
-  const inferredRole = isAdmin ? "admin" : trimmedIdentifier.toLowerCase().includes("manager") || selectedRole === "manager" ? "manager" : "employee";
+  const inferredRole: FieldSession["role"] = isAdmin ? "admin" : isManager ? "manager" : "employee";
   const normalizedId = digits.length === 10 ? `+91${digits}` : trimmedIdentifier;
 
   return {
@@ -172,33 +175,25 @@ function buildPreviewSession(
   };
 }
 
-export async function syncUsersWithServer(usersToSync?: ManagedUser[]): Promise<ManagedUser[] | null> {
+export async function syncUsersWithServer(): Promise<ManagedUser[] | null> {
   try {
-    const apiBase = getApiBaseUrl();
-    if (!apiBase) return null;
-
-    if (usersToSync && usersToSync.length > 0) {
-      const res = await fetch(`${apiBase}/api/users/sync`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ users: usersToSync }),
-      });
-      const resData = await res.json();
-      if (resData?.success && Array.isArray(resData?.users)) {
-        return resData.users as ManagedUser[];
-      }
-    } else {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 4000);
-      const res = await fetch(`${apiBase}/api/users`, { signal: controller.signal });
-      clearTimeout(timeout);
-      const resData = await res.json();
-      if (resData?.success && Array.isArray(resData?.users)) {
-        return resData.users as ManagedUser[];
-      }
+    const { trpcClient } = require("@/lib/trpc");
+    const serverUsers = await trpcClient.workforce.listUsers.query();
+    if (Array.isArray(serverUsers)) {
+      return serverUsers.map((su: any) => ({
+        id: String(su.id),
+        accountLinkId: `account-${su.id}`,
+        displayName: su.name || su.phoneE164 || "Field Worker",
+        identifier: su.phoneE164 || su.openId,
+        role: su.role === "admin" ? "admin" : su.role === "manager" ? "manager" : "employee",
+        status: su.accountStatus === "active" ? "active" : su.accountStatus === "invited" ? "invited" : "suspended",
+        dailyWage: su.dailyWage ?? 0,
+        managerId: su.managerId ? String(su.managerId) : undefined,
+        createdAt: su.createdAt ? new Date(su.createdAt).toISOString() : new Date().toISOString(),
+      }));
     }
   } catch (err) {
-    console.warn("[UserSync] Server sync warning:", err);
+    // Expected if not authenticated or caller is employee
   }
   return null;
 }
@@ -296,6 +291,11 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
         if (active) setIsHydrated(true);
       });
 
+    try {
+      const { initOfflineAutoSync } = require("@/lib/offline-sync");
+      initOfflineAutoSync();
+    } catch {}
+
     return () => {
       active = false;
       clearTimeout(hydrationFallback);
@@ -368,53 +368,133 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
+  const setServerSession = useCallback((serverUser: {
+    id: number;
+    openId: string;
+    name?: string | null;
+    phoneE164?: string | null;
+    role: "admin" | "manager" | "employee" | "user";
+    dailyWage?: number;
+    managerId?: number | null;
+    accountStatus?: string;
+  }) => {
+    const role: FieldRole =
+      serverUser.role === "admin"
+        ? "admin"
+        : serverUser.role === "manager"
+        ? "manager"
+        : "employee";
+
+    const session: FieldSession = {
+      id: String(serverUser.id),
+      numericId: serverUser.id,
+      identifier: serverUser.phoneE164 || serverUser.openId,
+      displayName: serverUser.name || (serverUser.phoneE164 ? serverUser.phoneE164 : "Field User"),
+      role,
+      isPreview: false,
+      signedInAt: new Date().toISOString(),
+      dailyWage: serverUser.dailyWage ?? 0,
+      managerId: serverUser.managerId ? String(serverUser.managerId) : undefined,
+      accountStatus: serverUser.accountStatus,
+    };
+
+    setData((current) => {
+      const exists = current.managedUsers.find(
+        (u) => u.id === String(serverUser.id) || normalizeIdentifier(u.identifier) === normalizeIdentifier(session.identifier)
+      );
+      const updatedUser: ManagedUser = {
+        id: String(serverUser.id),
+        accountLinkId: `account-${serverUser.id}`,
+        displayName: session.displayName,
+        identifier: session.identifier,
+        role: session.role,
+        status: (serverUser.accountStatus as any) || "active",
+        dailyWage: session.dailyWage ?? 0,
+        managerId: session.managerId,
+        createdAt: exists ? exists.createdAt : new Date().toISOString(),
+      };
+
+      const updatedUsers = exists
+        ? current.managedUsers.map((u) => (u.id === exists.id ? { ...u, ...updatedUser } : u))
+        : [updatedUser, ...current.managedUsers];
+
+      const nextWorkspace: FieldWorkspace = {
+        ...current,
+        session,
+        managedUsers: updatedUsers,
+      };
+      persistWorkspaceToStorage(nextWorkspace);
+      return nextWorkspace;
+    });
+  }, []);
+
   const signOut = useCallback(() => {
     stopManagedRouteTracking().catch(() => undefined);
     setData((current) => ({ ...current, session: null, trackingActive: false, trackingMode: "idle" }));
     if (Platform.OS === "web") {
       if (typeof sessionStorage !== "undefined") sessionStorage.removeItem(FIELD_SESSION_KEY);
-      return;
+      if (typeof localStorage !== "undefined") localStorage.removeItem(FIELD_SESSION_KEY);
     }
     SecureStore.deleteItemAsync(FIELD_SESSION_KEY).catch(() => undefined);
+    try {
+      const { removeSessionToken, clearUserInfo } = require("@/lib/_core/auth");
+      removeSessionToken().catch(() => undefined);
+      if (clearUserInfo) clearUserInfo().catch(() => undefined);
+    } catch {}
   }, []);
 
-  const createManagedUser = useCallback((input: Omit<ManagedUser, "id" | "accountLinkId" | "status" | "createdAt" | "accessIssuedAt">) => {
-    if (!canAdminManageAccount(data.session?.role)) return "";
-    const accountLinkId = createId("account");
-    const createdAt = new Date().toISOString();
+  const createManagedUser = useCallback(async (input: Omit<ManagedUser, "id" | "accountLinkId" | "status" | "createdAt" | "accessIssuedAt">) => {
+    let cleanPhone = input.identifier.trim();
+    if (/^\d{10}$/.test(cleanPhone)) cleanPhone = `+91${cleanPhone}`;
+    else if (!cleanPhone.startsWith("+")) cleanPhone = `+${cleanPhone}`;
+
+    const { trpcClient } = require("@/lib/trpc");
+    const result = await trpcClient.workforce.createUser.mutate({
+      name: input.displayName.trim(),
+      phoneE164: cleanPhone,
+      role: input.role === "admin" ? "admin" : input.role === "manager" ? "manager" : "employee",
+      department: input.department,
+      dailyWage: input.dailyWage,
+      managerId: input.managerId ? parseInt(input.managerId, 10) : undefined,
+    });
+
+    const serverUser = result.user;
     const user: ManagedUser = {
-      ...input,
-      dailyWage: input.dailyWage ?? 0,
-      id: createId("member"),
-      accountLinkId,
+      id: String(serverUser.id),
+      accountLinkId: `account-${serverUser.id}`,
+      displayName: serverUser.name || input.displayName,
+      identifier: serverUser.phoneE164 || cleanPhone,
+      role: (serverUser.role === "admin" ? "admin" : serverUser.role === "manager" ? "manager" : "employee") as FieldRole,
       status: "active",
-      createdAt,
+      department: input.department,
+      dailyWage: serverUser.dailyWage,
+      managerId: serverUser.managerId ? String(serverUser.managerId) : undefined,
+      createdAt: new Date(serverUser.createdAt).toISOString(),
     };
+
+    const createdAt = new Date().toISOString();
     const event: AccountLifecycleEvent = {
       id: createId("account-event"),
       userId: user.id,
-      accountLinkId,
+      accountLinkId: user.accountLinkId,
       action: "account-created",
       performedById: data.session?.id,
       occurredAt: createdAt,
-      detail: "Linked account invitation created and queued for secure delivery.",
+      detail: "Linked account created and registered on server.",
     };
+
     setData((current) => {
       const nextWorkspace = {
         ...current,
-        managedUsers: [user, ...current.managedUsers],
+        managedUsers: [user, ...current.managedUsers.filter((u) => u.id !== user.id)],
         accountEvents: [event, ...current.accountEvents],
-        offlineQueue: [queueOperation("account", `Account invitation for “${user.displayName}” awaiting secure sync`), ...current.offlineQueue],
       };
       persistWorkspaceToStorage(nextWorkspace);
       return nextWorkspace;
     });
 
-    // Broadcast newly created user to VM instance immediately so all other devices receive it
-    syncUsersWithServer([user]).catch((e) => console.warn("[UserSync] Push error:", e));
-
     return user.id;
-  }, [data.session?.id, data.session?.role]);
+  }, [data.session?.id]);
 
   const issueManagedUserAccess = useCallback((userId: string) => {
     const target = data.managedUsers.find((user) => user.id === userId);
@@ -427,7 +507,7 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
       action: "access-issued",
       performedById: data.session?.id,
       occurredAt: issuedAt,
-      detail: "Account access invitation issued and queued for secure OTP delivery.",
+      detail: "Account access invitation issued.",
     };
     setData((current) => {
       const nextWorkspace = {
@@ -436,7 +516,6 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
           user.id === userId ? { ...user, status: "active" as const, accessIssuedAt: issuedAt } : user
         ),
         accountEvents: [event, ...current.accountEvents],
-        offlineQueue: [queueOperation("account", `Account access for “${target.displayName}” awaiting secure delivery`), ...current.offlineQueue],
       };
       persistWorkspaceToStorage(nextWorkspace);
       return nextWorkspace;
@@ -444,7 +523,7 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
     return true;
   }, [data.managedUsers, data.session?.id, data.session?.role]);
 
-  const removeManagedUser = useCallback((userId: string) => {
+  const removeManagedUser = useCallback(async (userId: string) => {
     const target = data.managedUsers.find((user) => user.id === userId);
     if (
       !target ||
@@ -458,6 +537,16 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
       })
     )
       return false;
+
+    const numericUserId = parseInt(userId, 10);
+    if (!isNaN(numericUserId)) {
+      const { trpcClient } = require("@/lib/trpc");
+      await trpcClient.workforce.updateUserStatus.mutate({
+        targetUserId: numericUserId,
+        accountStatus: "suspended",
+      });
+    }
+
     const removedAt = new Date().toISOString();
     const event: AccountLifecycleEvent = {
       id: createId("account-event"),
@@ -466,28 +555,23 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
       action: "account-removed",
       performedById: data.session?.id,
       occurredAt: removedAt,
-      detail: "Linked account removed from the active directory; retained work records remain audit-only.",
+      detail: "Linked account suspended on server directory.",
     };
+
     setData((current) => {
       const nextWorkspace = {
         ...current,
         managedUsers: current.managedUsers.filter((user) => user.id !== userId),
         accountEvents: [event, ...current.accountEvents],
-        offlineQueue: [queueOperation("account", `Account removal for “${target.displayName}” awaiting secure sync`), ...current.offlineQueue],
       };
       persistWorkspaceToStorage(nextWorkspace);
       return nextWorkspace;
     });
 
-    const apiBase = getApiBaseUrl();
-    if (apiBase) {
-      fetch(`${apiBase}/api/users/${userId}`, { method: "DELETE" }).catch(() => {});
-    }
-
     return true;
   }, [data.managedUsers, data.session?.id, data.session?.identifier, data.session?.role]);
 
-  const updateManagedUser = useCallback((userId: string, updates: Partial<Omit<ManagedUser, "id" | "createdAt">>) => {
+  const updateManagedUser = useCallback(async (userId: string, updates: Partial<Omit<ManagedUser, "id" | "createdAt">>) => {
     if (!canAdminManageAccount(data.session?.role)) return false;
     const target = data.managedUsers.find((user) => user.id === userId);
     if (!target) return false;
@@ -501,6 +585,25 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
     const validatedWage = updates.dailyWage !== undefined
       ? Math.max(0, Math.min(100000, Math.round(updates.dailyWage || 0)))
       : target.dailyWage;
+
+    const numericUserId = parseInt(userId, 10);
+    if (!isNaN(numericUserId)) {
+      const { trpcClient } = require("@/lib/trpc");
+      if (updates.role || updates.status || updates.managerId !== undefined) {
+        await trpcClient.workforce.updateUserStatus.mutate({
+          targetUserId: numericUserId,
+          role: updates.role ? (updates.role as any) : undefined,
+          accountStatus: updates.status ? (updates.status as any) : undefined,
+          managerId: updates.managerId ? parseInt(updates.managerId, 10) : updates.managerId === null ? null : undefined,
+        });
+      }
+      if (updates.dailyWage !== undefined && (updates.role === "employee" || (!updates.role && target.role === "employee"))) {
+        await trpcClient.workforce.setEmployeeWage.mutate({
+          targetUserId: numericUserId,
+          dailyWage: validatedWage,
+        });
+      }
+    }
 
     setData((current) => {
       const nextWorkspace = {
@@ -516,28 +619,15 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
               }
             : user
         ),
-        offlineQueue: [
-          queueOperation("account", `Updated account details for “${updates.displayName || target.displayName}”`),
-          ...current.offlineQueue,
-        ],
       };
       persistWorkspaceToStorage(nextWorkspace);
       return nextWorkspace;
     });
 
-    const updatedUser = {
-      ...target,
-      ...updates,
-      identifier: cleanPhone,
-      dailyWage: (updates.role || target.role) === "employee" ? validatedWage : 0,
-      displayName: updates.displayName?.trim() || target.displayName,
-    };
-    syncUsersWithServer([updatedUser as ManagedUser]).catch(() => {});
-
     return true;
   }, [data.managedUsers, data.session?.role]);
 
-  const updateEmployeeWage = useCallback((userId: string, newDailyWage: number) => {
+  const updateEmployeeWage = useCallback(async (userId: string, newDailyWage: number) => {
     const target = data.managedUsers.find((user) => user.id === userId);
     if (!target) return false;
     const allowed = canSetEmployeeWage({
@@ -549,17 +639,24 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
     });
     if (!allowed) return false;
 
+    const numericUserId = parseInt(userId, 10);
+    if (isNaN(numericUserId)) {
+      throw new Error(`Invalid user ID: ${userId}`);
+    }
+
     const validatedWage = Math.max(0, Math.min(100000, Math.round(newDailyWage || 0)));
+    const { trpcClient } = require("@/lib/trpc");
+    await trpcClient.workforce.setEmployeeWage.mutate({
+      targetUserId: numericUserId,
+      dailyWage: validatedWage,
+    });
+
     setData((current) => {
       const nextWorkspace = {
         ...current,
         managedUsers: current.managedUsers.map((user) =>
           user.id === userId ? { ...user, dailyWage: validatedWage } : user
         ),
-        offlineQueue: [
-          queueOperation("account", `Updated wage for “${target.displayName}” to ₹${validatedWage}/day`),
-          ...current.offlineQueue,
-        ],
       };
       persistWorkspaceToStorage(nextWorkspace);
       return nextWorkspace;
@@ -567,7 +664,7 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
     return true;
   }, [data.managedUsers, data.session?.id, data.session?.role]);
 
-  const createTask = useCallback((input: {
+  const createTask = useCallback(async (input: {
     title: string;
     description?: string;
     assignedToUserId: string;
@@ -577,52 +674,93 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
     locationAddress?: string;
     customerName?: string;
   }) => {
-    const taskId = createId("task");
-    const now = new Date().toISOString();
-    const newTask = {
-      id: taskId,
+    let numericUserId = parseInt(input.assignedToUserId, 10);
+    if (isNaN(numericUserId)) {
+      const user = data.managedUsers.find((u) => u.id === input.assignedToUserId);
+      if (user) {
+        numericUserId = parseInt(user.id, 10);
+      }
+    }
+    if (isNaN(numericUserId)) {
+      throw new Error(`Invalid employee ID: ${input.assignedToUserId}. Must be a valid registered employee.`);
+    }
+
+    const { trpcClient } = require("@/lib/trpc");
+    const serverTask = await trpcClient.tasks.create.mutate({
       title: input.title.trim(),
       description: input.description?.trim(),
-      assignedToUserId: input.assignedToUserId,
-      assignedToName: input.assignedToName,
-      assignedByUserId: data.session?.id || "admin",
-      assignedByName: data.session?.displayName || "Administrator",
+      assignedToUserId: numericUserId,
       scheduledDate: input.scheduledDate,
       priority: input.priority,
-      status: "PENDING" as const,
-      locationAddress: input.locationAddress,
-      customerName: input.customerName,
-      createdAt: now,
-      updatedAt: now,
+      locationAddress: input.locationAddress?.trim(),
+      customerName: input.customerName?.trim(),
+    });
+
+    const newTask = {
+      id: serverTask.id,
+      title: serverTask.title,
+      description: serverTask.description || undefined,
+      assignedToUserId: String(serverTask.assignedToUserId),
+      assignedToName: input.assignedToName,
+      assignedByUserId: String(serverTask.assignedByUserId),
+      assignedByName: data.session?.displayName || "Administrator",
+      scheduledDate: serverTask.scheduledDate,
+      priority: serverTask.priority,
+      status: serverTask.status,
+      locationAddress: serverTask.locationAddress || undefined,
+      customerName: serverTask.customerName || undefined,
+      createdAt: new Date(serverTask.createdAt).toISOString(),
+      updatedAt: new Date(serverTask.updatedAt).toISOString(),
     };
 
-    setData((current) => ({
-      ...current,
-      tasks: [newTask, ...current.tasks],
-      offlineQueue: [
-        queueOperation("account", `Task “${newTask.title}” assigned to ${input.assignedToName || input.assignedToUserId}`),
-        ...current.offlineQueue,
-      ],
-    }));
-    return taskId;
-  }, [data.session?.id, data.session?.displayName]);
+    setData((current) => {
+      const nextWorkspace = {
+        ...current,
+        tasks: [newTask, ...current.tasks.filter((t) => t.id !== newTask.id)],
+      };
+      persistWorkspaceToStorage(nextWorkspace);
+      return nextWorkspace;
+    });
 
-  const updateTaskStatus = useCallback((taskId: string, newStatus: "PENDING" | "IN_PROGRESS" | "COMPLETED") => {
+    return serverTask.id;
+  }, [data.managedUsers, data.session?.displayName]);
+
+  const updateTaskStatus = useCallback(async (taskId: string, newStatus: "PENDING" | "IN_PROGRESS" | "COMPLETED") => {
+    const { trpcClient } = require("@/lib/trpc");
+    let updatedServerTask: any = null;
+    try {
+      updatedServerTask = await trpcClient.tasks.updateStatus.mutate({
+        taskId,
+        status: newStatus,
+      });
+    } catch (err) {
+      console.warn("[Tasks] Server update status queued offline:", err);
+      const { enqueueOperation } = require("@/lib/offline-sync");
+      await enqueueOperation("TASK_UPDATE", { taskId, status: newStatus }, "high").catch(() => {});
+    }
+
     const now = new Date().toISOString();
-    setData((current) => ({
-      ...current,
-      tasks: current.tasks.map((task) => {
-        if (task.id !== taskId) return task;
-        const updates: Record<string, unknown> = { status: newStatus, updatedAt: now };
-        if (newStatus === "IN_PROGRESS" && !task.startedAt) updates.startedAt = now;
-        if (newStatus === "COMPLETED") updates.completedAt = now;
-        return { ...task, ...updates } as typeof task;
-      }),
-      offlineQueue: [
-        queueOperation("account", `Task status updated to ${newStatus}`),
-        ...current.offlineQueue,
-      ],
-    }));
+    setData((current) => {
+      const nextWorkspace = {
+        ...current,
+        tasks: current.tasks.map((task) => {
+          if (task.id !== taskId) return task;
+          const updates: Record<string, unknown> = {
+            status: newStatus,
+            updatedAt: now,
+          };
+          if (newStatus === "IN_PROGRESS" && !task.startedAt) {
+            updates.startedAt = updatedServerTask?.startedAt ? new Date(updatedServerTask.startedAt).toISOString() : now;
+          }
+          if (newStatus === "COMPLETED") {
+            updates.completedAt = updatedServerTask?.completedAt ? new Date(updatedServerTask.completedAt).toISOString() : now;
+          }
+          return { ...task, ...updates } as typeof task;
+        }),
+      };
+      persistWorkspaceToStorage(nextWorkspace);
+      return nextWorkspace;
+    });
   }, []);
 
   const startRouteTracking = useCallback(async () => {
@@ -652,91 +790,149 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
     if (data.session?.role && data.session.role !== "employee") {
       throw new Error("Forbidden: Admin and Manager are salaried management and do not participate in attendance check-in.");
     }
-    const capturedAt = new Date().toISOString();
-    const status = verificationStatus(input.location);
 
-    setData((current) => {
-      const openAttendance = current.attendance.find(
-        (record) => !record.checkOutAt && (!record.employeeId || record.employeeId === current.session?.id || getDayKey(record.checkInAt) === getDayKey(capturedAt))
+    const isOfflineErr = (e: any) => {
+      const msg = (e?.message || "").toLowerCase();
+      return (
+        msg.includes("failed to fetch") ||
+        msg.includes("network request failed") ||
+        msg.includes("network error") ||
+        msg.includes("connection refused") ||
+        (typeof navigator !== "undefined" && !navigator.onLine)
       );
+    };
 
-      if (input.action === "check-out") {
-        const targetRecord = openAttendance || current.attendance.find((record) => getDayKey(record.checkInAt) === getDayKey(capturedAt));
-        if (targetRecord) {
-          const checkoutStatus: AttendanceRecord["status"] =
-            targetRecord.status === "verified" && status === "verified" ? "verified" : "review";
-          const updatedAttendance = current.attendance.map((record) =>
-            record.id === targetRecord.id
-              ? {
-                  ...record,
-                  checkOutAt: capturedAt,
-                  checkOutPhotoUri: input.photoUri,
-                  checkOutLocation: input.location,
-                  status: checkoutStatus,
-                  syncState: "awaiting-server" as const,
-                }
-              : record,
-          );
-          return {
-            ...current,
-            attendance: updatedAttendance,
-            offlineQueue: [
-              queueOperation("attendance", "Attendance check-out awaiting secure sync"),
-              ...current.offlineQueue,
-            ],
-          };
+    if (input.action === "check-in") {
+      let serverResult: any = null;
+      const idempotencyKey = `att_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+
+      try {
+        const { trpcClient } = require("@/lib/trpc");
+        serverResult = await trpcClient.attendance.checkIn.mutate({
+          checkInPhotoUri: input.photoUri,
+          checkInLat: String(input.location.latitude),
+          checkInLng: String(input.location.longitude),
+          checkInAccuracy: input.location.accuracy ? Math.round(input.location.accuracy) : undefined,
+          idempotencyKey,
+        });
+      } catch (err: any) {
+        if (!isOfflineErr(err)) {
+          // Real server rejection (e.g. outside geofence, duplicate open check-in, missing photo, not employee).
+          // Surface error and DO NOT save local record!
+          throw err;
         }
+        // Truly offline: enqueue into offline queue with idempotencyKey
+        const { enqueueOperation } = require("@/lib/offline-sync");
+        await enqueueOperation(
+          "ATTENDANCE_CHECK_IN",
+          {
+            photoUri: input.photoUri,
+            location: input.location,
+            idempotencyKey,
+          },
+          "high"
+        ).catch(() => {});
       }
 
+      const capturedAt = new Date().toISOString();
+      const status: AttendanceRecord["status"] = serverResult
+        ? serverResult.status
+        : verificationStatus(input.location);
+
       const record: AttendanceRecord = {
-        id: createId("attendance"),
-        employeeId: current.session?.id,
-        checkInAt: capturedAt,
+        id: serverResult ? serverResult.id : idempotencyKey,
+        employeeId: data.session?.id,
+        checkInAt: serverResult ? new Date(serverResult.checkInAt).toISOString() : capturedAt,
         checkInPhotoUri: input.photoUri,
         checkInLocation: input.location,
         status,
-        lateEarlyLabel: "Pending policy",
-        syncState: "awaiting-server",
+        lateEarlyLabel: "On time",
+        syncState: serverResult ? "synced" : "awaiting-server",
       };
 
-      return {
-        ...current,
-        attendance: [record, ...current.attendance],
-        offlineQueue: [
-          queueOperation("attendance", "Attendance check-in awaiting secure sync"),
-          ...current.offlineQueue,
-        ],
-      };
-    });
-    if (input.action === "check-out") {
+      setData((current) => {
+        const nextWorkspace = {
+          ...current,
+          attendance: [record, ...current.attendance.filter((r) => r.id !== record.id)],
+        };
+        persistWorkspaceToStorage(nextWorkspace);
+        return nextWorkspace;
+      });
+
+      if (!shouldStartTrackingAfterAttendance({ attendanceAction: input.action, trackingActive: data.trackingActive })) {
+        return { action: input.action, trackingStopped: false };
+      }
+
+      const tracking = await startRouteTracking();
+      if (shouldEscalateTrackingPermission(tracking)) {
+        const alert: TrackingPermissionAlert = {
+          id: createId("tracking-alert"),
+          employeeId: data.session?.id,
+          employeeName: data.session?.displayName ?? "Field employee",
+          createdAt: new Date().toISOString(),
+          reason: "location-permission-denied",
+          recipientRoles: ["manager", "admin"],
+          status: "awaiting-server",
+        };
+        setData((current) => ({
+          ...current,
+          trackingPermissionAlerts: [alert, ...current.trackingPermissionAlerts],
+          offlineQueue: [queueOperation("alert", `Tracking permission alert for “${alert.employeeName}” awaiting manager/admin delivery`), ...current.offlineQueue],
+        }));
+      }
+      return { action: input.action, tracking, trackingStopped: false };
+    } else {
+      // Check-out
+      let serverResult: any = null;
+      try {
+        const { trpcClient } = require("@/lib/trpc");
+        serverResult = await trpcClient.attendance.checkOut.mutate({
+          checkOutPhotoUri: input.photoUri,
+        });
+      } catch (err: any) {
+        if (!isOfflineErr(err)) {
+          throw err;
+        }
+        const { enqueueOperation } = require("@/lib/offline-sync");
+        await enqueueOperation(
+          "ATTENDANCE_CHECK_OUT",
+          { photoUri: input.photoUri, location: input.location },
+          "high"
+        ).catch(() => {});
+      }
+
+      const capturedAt = new Date().toISOString();
+      setData((current) => {
+        const updatedAttendance = current.attendance.map((rec) => {
+          if (
+            (serverResult && rec.id === serverResult.id) ||
+            (!rec.checkOutAt && (!rec.employeeId || rec.employeeId === current.session?.id))
+          ) {
+            return {
+              ...rec,
+              checkOutAt: capturedAt,
+              checkOutPhotoUri: input.photoUri,
+              checkOutLocation: input.location,
+              status: (serverResult?.status as any) || rec.status,
+              syncState: serverResult ? ("synced" as const) : ("awaiting-server" as const),
+            };
+          }
+          return rec;
+        });
+
+        const nextWorkspace = {
+          ...current,
+          attendance: updatedAttendance,
+        };
+        persistWorkspaceToStorage(nextWorkspace);
+        return nextWorkspace;
+      });
+
       const trackingStopped = data.trackingActive;
       if (trackingStopped) await stopRouteTracking();
       return { action: input.action, trackingStopped };
     }
-
-    if (!shouldStartTrackingAfterAttendance({ attendanceAction: input.action, trackingActive: data.trackingActive })) {
-      return { action: input.action, trackingStopped: false };
-    }
-
-    const tracking = await startRouteTracking();
-    if (shouldEscalateTrackingPermission(tracking)) {
-      const alert: TrackingPermissionAlert = {
-        id: createId("tracking-alert"),
-        employeeId: data.session?.id,
-        employeeName: data.session?.displayName ?? "Field employee",
-        createdAt: new Date().toISOString(),
-        reason: "location-permission-denied",
-        recipientRoles: ["manager", "admin"],
-        status: "awaiting-server",
-      };
-      setData((current) => ({
-        ...current,
-        trackingPermissionAlerts: [alert, ...current.trackingPermissionAlerts],
-        offlineQueue: [queueOperation("alert", `Tracking permission alert for “${alert.employeeName}” awaiting manager/admin delivery`), ...current.offlineQueue],
-      }));
-    }
-    return { action: input.action, tracking, trackingStopped: false };
-  }, [data.session?.displayName, data.session?.id, data.trackingActive, startRouteTracking, stopRouteTracking]);
+  }, [data.session?.displayName, data.session?.id, data.session?.role, data.trackingActive, startRouteTracking, stopRouteTracking]);
 
   const captureVisitEvidence = useCallback((input: VisitCaptureInput) => {
     const capturedAt = new Date().toISOString();
@@ -825,10 +1021,24 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
     }));
   }, []);
 
-  const addRoutePoint = useCallback((point: LocationEvidence) => {
+  const addRoutePoint = useCallback(async (point: LocationEvidence) => {
     const routePoint: RoutePoint = { ...point, id: createId("route"), employeeId: data.session?.id };
     setData((current) => ({ ...current, routePoints: [...current.routePoints, routePoint] }));
-  }, [data.session?.id]);
+
+    try {
+      if (data.session?.role === "employee") {
+        const { trpcClient } = require("@/lib/trpc");
+        await trpcClient.tracking.recordPoint.mutate({
+          latitude: point.latitude,
+          longitude: point.longitude,
+          accuracy: point.accuracy ? Math.round(point.accuracy) : undefined,
+          isMocked: point.mocked,
+        });
+      }
+    } catch (err) {
+      console.warn("[Tracking] Server record point warning:", err);
+    }
+  }, [data.session?.id, data.session?.role]);
 
   const setTrackingActive = useCallback((active: boolean) => {
     setData((current) => ({ ...current, trackingActive: active, trackingMode: active ? current.trackingMode === "idle" ? "foreground" : current.trackingMode : "idle" }));
@@ -843,6 +1053,7 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
       data,
       isHydrated,
       signInToPreview,
+      setServerSession,
       signOut,
       createManagedUser,
       issueManagedUserAccess,
@@ -873,11 +1084,14 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
       removeManagedUser,
       updateManagedUser,
       updateEmployeeWage,
+      createTask,
+      updateTaskStatus,
       createVisit,
       data,
       isHydrated,
       sendMessage,
       setNotificationsEnabled,
+      setServerSession,
       setTrackingActive,
       startRouteTracking,
       stopRouteTracking,

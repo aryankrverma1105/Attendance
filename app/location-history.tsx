@@ -43,10 +43,10 @@ export default function LocationHistoryScreen() {
   }, [data.routePoints, targetEmployeeId, selectedDate]);
 
   // Fetch server-side day route history
-  const numericTargetId = parseInt(targetEmployeeId, 10);
+  const numericTargetId = targetUser?.numericId || (parseInt(targetEmployeeId, 10) || data.session?.numericId || 1);
   const serverQuery = trpc.tracking.getDayRouteHistory.useQuery(
-    { targetUserId: isNaN(numericTargetId) ? 1 : numericTargetId, recordedDate: selectedDate },
-    { enabled: !isNaN(numericTargetId) && isAllowed }
+    { targetUserId: numericTargetId, recordedDate: selectedDate },
+    { enabled: Boolean(numericTargetId) && isAllowed }
   );
 
   // Available dates for quick selector (last 7 days)

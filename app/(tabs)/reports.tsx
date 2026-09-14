@@ -8,6 +8,8 @@ import { ScreenContainer } from "@/components/screen-container";
 import { calculateEarnings, calculateWorkedDays, formatCurrency, formatDay, useFieldData } from "@/lib/field-data";
 import { hasPermission } from "@/lib/field-access";
 
+import { trpc } from "@/lib/trpc";
+
 export default function ReportsScreen() {
   const router = useRouter();
   const { data } = useFieldData();
@@ -22,6 +24,25 @@ export default function ReportsScreen() {
   const currentMonth = now.getMonth() + 1;
   const currentYear = now.getFullYear();
 
+  const adminOverviewQuery = trpc.workforce.getAdminOverview.useQuery(undefined, {
+    enabled: Boolean(isAdmin),
+    refetchInterval: 15000,
+  });
+
+  const managerOverviewQuery = trpc.workforce.getManagerOverview.useQuery(undefined, {
+    enabled: Boolean(isManager),
+    refetchInterval: 15000,
+  });
+
+  const employeeDashboardQuery = trpc.workforce.getEmployeeDashboard.useQuery(undefined, {
+    enabled: Boolean(isEmployee),
+    refetchInterval: 15000,
+  });
+
+  const todayTasksQuery = trpc.tasks.listTodayTasks.useQuery(undefined, {
+    refetchInterval: 15000,
+  });
+
   // Scoped team members for Manager
   const scopedTeam = useMemo(() => {
     if (isAdmin) return data.managedUsers.filter((u) => u.role === "employee");
@@ -33,18 +54,27 @@ export default function ReportsScreen() {
     return [];
   }, [data.managedUsers, isAdmin, isManager, actorId]);
 
-  // Scoped tasks
+  // Scoped tasks (server-first if todayTasks available)
   const scopedTasks = useMemo(() => {
+    if (todayTasksQuery.data) {
+      return todayTasksQuery.data;
+    }
     if (isAdmin) return data.tasks;
     if (isManager) {
       const workerIds = new Set(scopedTeam.map((u) => u.id));
       return data.tasks.filter((t) => workerIds.has(t.assignedToUserId) || t.assignedByUserId === actorId);
     }
     return data.tasks.filter((t) => t.assignedToUserId === actorId);
-  }, [data.tasks, scopedTeam, isAdmin, isManager, actorId]);
+  }, [todayTasksQuery.data, data.tasks, scopedTeam, isAdmin, isManager, actorId]);
 
   // Total monthly estimated wages (strictly employees)
   const totalEstimatedPayroll = useMemo(() => {
+    if (isAdmin && adminOverviewQuery.data?.totalMonthlyPayroll !== undefined) {
+      return adminOverviewQuery.data.totalMonthlyPayroll;
+    }
+    if (isManager && managerOverviewQuery.data?.teamMonthlyPayroll !== undefined) {
+      return managerOverviewQuery.data.teamMonthlyPayroll;
+    }
     const targetUsers = isAdmin ? data.managedUsers : scopedTeam;
     return targetUsers.reduce((total, user) => {
       if (user.role !== "employee") return total;
@@ -55,18 +85,22 @@ export default function ReportsScreen() {
       const userEarnings = calculateEarnings(workedDays, user.dailyWage || 0);
       return total + userEarnings;
     }, 0);
-  }, [data.managedUsers, scopedTeam, data.attendance, currentMonth, currentYear, isAdmin, actorId]);
+  }, [isAdmin, isManager, adminOverviewQuery.data, managerOverviewQuery.data, data.managedUsers, scopedTeam, data.attendance, currentMonth, currentYear, actorId]);
 
   // Task stats
-  const completedTasks = scopedTasks.filter((t) => t.status === "COMPLETED").length;
-  const inProgressTasks = scopedTasks.filter((t) => t.status === "IN_PROGRESS").length;
-  const pendingTasks = scopedTasks.filter((t) => t.status === "PENDING").length;
+  const completedTasks = scopedTasks.filter((t) => (t as any).status === "COMPLETED").length;
+  const inProgressTasks = scopedTasks.filter((t) => (t as any).status === "IN_PROGRESS").length;
+  const pendingTasks = scopedTasks.filter((t) => (t as any).status === "PENDING").length;
   const completionRate = scopedTasks.length > 0 ? Math.round((completedTasks / scopedTasks.length) * 100) : 0;
 
   // Employee personal stats
   const myAttendance = data.attendance.filter((a) => a.employeeId === actorId || !a.employeeId);
-  const { workedDays: myWorkedDays } = calculateWorkedDays(myAttendance, currentMonth, currentYear);
-  const myEstimatedEarnings = calculateEarnings(myWorkedDays, data.session?.dailyWage || 0);
+  const { workedDays: localWorkedDays } = calculateWorkedDays(myAttendance, currentMonth, currentYear);
+  const myWorkedDays = employeeDashboardQuery.data?.workedDays ?? localWorkedDays;
+  const myEstimatedEarnings = employeeDashboardQuery.data?.calculatedEarnings ?? calculateEarnings(localWorkedDays, data.session?.dailyWage || 0);
+
+  const totalUsersCount = adminOverviewQuery.data?.totalEmployees ?? data.managedUsers.length;
+  const teamSizeCount = managerOverviewQuery.data?.teamSize ?? scopedTeam.length;
 
   const completedVisits = data.visits.filter((v) => v.status === "completed");
 
@@ -105,7 +139,7 @@ export default function ReportsScreen() {
                 icon="people"
                 label="Total Users"
                 tone="success"
-                value={data.managedUsers.length.toString()}
+                value={totalUsersCount.toString()}
               />
               <MetricCard
                 icon="task-alt"
@@ -173,7 +207,7 @@ export default function ReportsScreen() {
                 icon="groups"
                 label="Team Members"
                 tone="navy"
-                value={scopedTeam.length.toString()}
+                value={teamSizeCount.toString()}
               />
               <MetricCard
                 icon="task-alt"

@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import type { Express, Request, Response } from "express";
+import { sdk } from "./_core/sdk";
 
 const UPLOADS_DIR = path.join(process.cwd(), "uploads", "selfies");
 const RETENTION_DAYS = 180; // 6 Months (approx 180 days)
@@ -12,26 +13,70 @@ export function initSelfieStorage(app: Express) {
     fs.mkdirSync(UPLOADS_DIR, { recursive: true });
   }
 
-  // Serve static selfie uploads
-  app.use("/uploads", (req, res, next) => {
-    res.setHeader("Cache-Control", "public, max-age=86400"); // Cache for fast admin loading
+  // Secure media access middleware with IDOR defenses
+  app.use("/uploads", async (req, res, next) => {
+    let authUser;
+    try {
+      authUser = await sdk.authenticateRequest(req);
+    } catch {
+      return res.status(401).json({ error: "Unauthorized: Authentication required to access workforce media" });
+    }
+
+    if (authUser.role === "employee") {
+      // Check if photo filename matches this employee's ID
+      const requestedFilename = path.basename(req.path);
+      const parts = requestedFilename.split("-");
+      // file pattern: ${action}-${employeeId}-${timestamp}-${rand}.jpg
+      if (parts.length >= 3 && parts[1] && parts[1] !== "emp") {
+        const targetEmpId = parts[1];
+        if (targetEmpId !== String(authUser.id) && targetEmpId !== authUser.openId) {
+          return res.status(403).json({ error: "Forbidden: You do not have permission to view another employee's evidence" });
+        }
+      }
+    }
+
+    res.setHeader("Cache-Control", "private, no-cache, no-store");
     next();
   }, (req, res, next) => {
     const staticMiddleware = require("express").static(path.join(process.cwd(), "uploads"));
     return staticMiddleware(req, res, next);
   });
 
-  // REST API endpoint for uploading compressed selfies
+  // REST API endpoint for uploading compressed selfies & visit evidence
   app.post("/api/upload-selfie", async (req: Request, res: Response) => {
     try {
-      const { base64, action, employeeId } = req.body;
-      if (!base64) {
+      let authUser;
+      try {
+        authUser = await sdk.authenticateRequest(req);
+      } catch {
+        return res.status(401).json({ error: "Unauthorized: Authentication required" });
+      }
+
+      const { base64, action } = req.body;
+      if (!base64 || typeof base64 !== "string") {
         return res.status(400).json({ error: "Missing image base64 data" });
       }
 
-      // Remove header if present (data:image/jpeg;base64,...)
+      // Enforce 5MB maximum payload size
+      if (base64.length > 7.5 * 1024 * 1024) {
+        return res.status(413).json({ error: "Payload too large: Image exceeds 5MB maximum" });
+      }
+
+      // Validate image format (JPEG or PNG)
       const cleanBase64 = base64.replace(/^data:image\/\w+;base64,/, "");
       const buffer = Buffer.from(cleanBase64, "base64");
+
+      if (buffer.length > 5 * 1024 * 1024) {
+        return res.status(413).json({ error: "Payload too large: Image exceeds 5MB maximum" });
+      }
+
+      // Verify magic bytes: JPEG (ffd8ff), PNG (89504e47)
+      const isJpeg = buffer.length > 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+      const isPng = buffer.length > 4 && buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47;
+
+      if (!isJpeg && !isPng) {
+        return res.status(415).json({ error: "Unsupported Media Type: Only JPEG or PNG images are accepted" });
+      }
 
       const now = new Date();
       const year = now.getFullYear().toString();
@@ -42,7 +87,10 @@ export function initSelfieStorage(app: Express) {
         fs.mkdirSync(targetSubdir, { recursive: true });
       }
 
-      const fileId = `${action || "selfie"}-${employeeId || "emp"}-${Date.now()}-${Math.random().toString(36).substring(2, 7)}.jpg`;
+      // Derive employee ID strictly from authenticated user
+      const safeAction = (action || "selfie").replace(/[^a-zA-Z0-9_-]/g, "");
+      const safeEmpId = String(authUser.id).replace(/[^a-zA-Z0-9_-]/g, "");
+      const fileId = `${safeAction}-${safeEmpId}-${Date.now()}-${Math.random().toString(36).substring(2, 7)}.jpg`;
       const filePath = path.join(targetSubdir, fileId);
 
       await fs.promises.writeFile(filePath, buffer);
@@ -50,7 +98,7 @@ export function initSelfieStorage(app: Express) {
       const relativeUrl = `/uploads/selfies/${year}/${month}/${fileId}`;
       const fileSizeKb = Math.round(buffer.length / 1024);
 
-      console.log(`[Selfie Storage] Saved ${fileId} (${fileSizeKb} KB) to VM instance`);
+      console.log(`[Selfie Storage] Saved ${fileId} (${fileSizeKb} KB) for user ${authUser.id}`);
 
       return res.json({
         success: true,

@@ -35,6 +35,7 @@ describe("End-to-End RBAC & tRPC Procedure Security", () => {
     createdAt: new Date(),
     updatedAt: new Date(),
     lastSignedIn: new Date(),
+    sessionVersion: 1,
   };
 
   const managerA: AuthenticatedUser = {
@@ -52,6 +53,7 @@ describe("End-to-End RBAC & tRPC Procedure Security", () => {
     createdAt: new Date(),
     updatedAt: new Date(),
     lastSignedIn: new Date(),
+    sessionVersion: 1,
   };
 
   const employeeUser: AuthenticatedUser = {
@@ -69,6 +71,7 @@ describe("End-to-End RBAC & tRPC Procedure Security", () => {
     createdAt: new Date(),
     updatedAt: new Date(),
     lastSignedIn: new Date(),
+    sessionVersion: 1,
   };
 
   describe("setEmployeeWage Procedure Authorization", () => {

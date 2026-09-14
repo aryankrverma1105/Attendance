@@ -36,6 +36,7 @@ describe("Manager Authorization & Cross-Team Defense Security", () => {
     createdAt: new Date(),
     updatedAt: new Date(),
     lastSignedIn: new Date(),
+    sessionVersion: 1,
   };
 
   it("DENIES Manager from creating users (Privilege Escalation Defense)", async () => {
@@ -98,7 +99,11 @@ describe("Manager Authorization & Cross-Team Defense Security", () => {
     const caller = appRouter.createCaller(ctx);
 
     await expect(
-      caller.attendance.checkIn({ checkInLat: "23.3441", checkInLng: "85.3096" })
+      caller.attendance.checkIn({
+        checkInPhotoUri: "selfie-mock.jpg",
+        checkInLat: "23.3441",
+        checkInLng: "85.3096",
+      })
     ).rejects.toThrow(/Forbidden/);
 
     await expect(

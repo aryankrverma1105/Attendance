@@ -36,6 +36,7 @@ describe("Employee Authorization & Self-Scoping Defense Security", () => {
     createdAt: new Date(),
     updatedAt: new Date(),
     lastSignedIn: new Date(),
+    sessionVersion: 1,
   };
 
   it("DENIES Employee from User Directory listing (listUsers)", async () => {

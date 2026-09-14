@@ -49,8 +49,11 @@ export function getApiBaseUrl(): string {
     return `${protocol}//${hostname}${port ? `:${port}` : ""}`;
   }
 
-  // Native mobile default: point directly to the live GCP VM server on port 80
-  return "http://34.180.17.0";
+  // Native mobile: read from environment or default to secure HTTPS API domain
+  if (process.env.EXPO_PUBLIC_API_BASE_URL) {
+    return process.env.EXPO_PUBLIC_API_BASE_URL.replace(/\/$/, "");
+  }
+  return "https://api.fieldpulse.app";
 }
 
 export const SESSION_TOKEN_KEY = "app_session_token";

@@ -915,4 +915,106 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     gap: 10,
   },
+  skeleton: {
+    backgroundColor: "#E2E8F0",
+    borderRadius: 8,
+    overflow: "hidden",
+  },
+  syncBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 12,
+    backgroundColor: "#F1F5F9",
+    borderWidth: 1,
+    borderColor: "#E2E8F0",
+  },
+  syncBadgeSynced: {
+    backgroundColor: "#ECFDF5",
+    borderColor: "#A7F3D0",
+  },
+  syncBadgePending: {
+    backgroundColor: "#FFFBEB",
+    borderColor: "#FDE68A",
+  },
+  syncDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  syncText: {
+    fontSize: 11,
+    fontWeight: "700",
+  },
 });
+
+/**
+ * Premium Skeleton Loader for async loading states
+ */
+export function SkeletonLoader({
+  width = "100%",
+  height = 20,
+  borderRadius = 8,
+  style,
+}: {
+  width?: number | `${number}%` | "100%";
+  height?: number;
+  borderRadius?: number;
+  style?: StyleProp<ViewStyle>;
+}) {
+  return (
+    <View
+      style={[
+        styles.skeleton,
+        { width: width as any, height, borderRadius },
+        style,
+      ]}
+    />
+  );
+}
+
+/**
+ * User-visible Offline Synchronization Status Badge
+ */
+export function OfflineSyncStatusBadge({
+  pendingCount = 0,
+  isSyncing = false,
+  onPress,
+}: {
+  pendingCount?: number;
+  isSyncing?: boolean;
+  onPress?: () => void;
+}) {
+  const isSynced = pendingCount === 0 && !isSyncing;
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.syncBadge,
+        isSynced ? styles.syncBadgeSynced : styles.syncBadgePending,
+        pressed && { opacity: 0.8 },
+      ]}
+    >
+      <View
+        style={[
+          styles.syncDot,
+          { backgroundColor: isSynced ? "#10B981" : isSyncing ? "#3B82F6" : "#F59E0B" },
+        ]}
+      />
+      <Text
+        style={[
+          styles.syncText,
+          { color: isSynced ? "#065F46" : isSyncing ? "#1E40AF" : "#92400E" },
+        ]}
+      >
+        {isSyncing
+          ? "Syncing…"
+          : isSynced
+          ? "Cloud synced"
+          : `${pendingCount} queued`}
+      </Text>
+    </Pressable>
+  );
+}

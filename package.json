@@ -13,10 +13,16 @@
     "lint": "expo lint",
     "format": "prettier --write .",
     "test": "vitest run",
+    "test:e2e": "playwright test",
     "db:push": "drizzle-kit generate && drizzle-kit migrate",
     "android": "expo run:android",
     "ios": "expo run:ios",
-    "qr": "node scripts/generate_qr.mjs"
+    "qr": "node scripts/generate_qr.mjs",
+    "build:apk": "npx eas-cli build -p android --profile preview",
+    "build:apk:local": "npx eas-cli build -p android --profile preview --local",
+    "build:apk:dev": "npx eas-cli build -p android --profile development",
+    "build:apk:gradle": "powershell -Command \"cd android; .\\gradlew.bat assembleRelease\"",
+    "build:apk:gradle-debug": "powershell -Command \"cd android; .\\gradlew.bat assembleDebug\""
   },
   "dependencies": {
     "@expo/vector-icons": "^15.0.3",

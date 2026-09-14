@@ -39,16 +39,23 @@ export function getFirebaseAdmin() {
 }
 
 export async function verifyFirebaseToken(idToken: string) {
+  // Mock token code path: strictly dev/preview-only fallback.
+  // In production, mock tokens are rejected and real Firebase ID tokens must be verified.
   if (idToken.startsWith("mock_token_")) {
-    const raw = idToken.replace("mock_token_phone_", "").replace("mock_token_uid_", "");
-    let phoneE164 = decodeURIComponent(raw);
-    if (!phoneE164 || phoneE164.includes("mock")) {
-      phoneE164 = "+919835916278";
-    } else if (!phoneE164.startsWith("+")) {
-      phoneE164 = `+${phoneE164}`;
+    if (ENV.isProduction) {
+      throw new Error("Mock authentication tokens are strictly forbidden in production");
     }
+
+    const raw = idToken.replace("mock_token_phone_", "").replace("mock_token_uid_", "");
+    const phone = decodeURIComponent(raw);
+    const digits = phone.replace(/[^0-9]/g, "");
+    if (!digits || digits.length < 10) {
+      throw new Error("Mock token requires an explicit, valid phone number");
+    }
+
+    const phoneE164 = phone.startsWith("+") ? phone : `+${digits}`;
     return {
-      uid: `web_${phoneE164.replace(/[^0-9]/g, "")}`,
+      uid: `dev_${digits}`,
       phone_number: phoneE164,
     };
   }

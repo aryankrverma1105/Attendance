@@ -4,6 +4,7 @@ import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, router, protectedProcedure } from "./_core/trpc";
 import { verifyFirebaseToken } from "./_core/firebase";
+import { ENV } from "./_core/env";
 import { sdk } from "./_core/sdk";
 import {
   getDb,
@@ -30,84 +31,95 @@ export const appRouter = router({
           try {
             decodedToken = await verifyFirebaseToken(input.idToken);
           } catch (tokenErr) {
-            console.warn("[Auth] Token verification fallback for web/preview:", tokenErr);
-            const clean = input.idToken.replace("mock_token_phone_", "").replace("mock_token_uid_", "");
-            const decoded = decodeURIComponent(clean);
-            const phone = decoded.startsWith("+") ? decoded : `+${decoded.replace(/[^0-9]/g, "") || "919835916278"}`;
-            decodedToken = {
-              uid: `web_${phone.replace(/[^0-9]/g, "")}`,
-              phone_number: phone,
-            };
+            if (!ENV.isProduction) {
+              // Dev/preview-only fallback: only allowed in non-production environments with explicit mock tokens.
+              if (input.idToken.startsWith("mock_token_")) {
+                console.warn("[Auth] Token verification fallback for web/preview (dev-only):", tokenErr);
+                const clean = input.idToken.replace("mock_token_phone_", "").replace("mock_token_uid_", "");
+                const decoded = decodeURIComponent(clean);
+                const digits = decoded.replace(/[^0-9]/g, "");
+                if (!digits || digits.length < 10) {
+                  throw new TRPCError({
+                    code: "BAD_REQUEST",
+                    message: "Explicit valid phone number required in mock token.",
+                  });
+                }
+                const phone = decoded.startsWith("+") ? decoded : `+${digits}`;
+                decodedToken = {
+                  uid: `web_${digits}`,
+                  phone_number: phone,
+                };
+              } else {
+                console.error("[Auth] Dev token verification failed:", tokenErr);
+                throw new TRPCError({
+                  code: "UNAUTHORIZED",
+                  message: "Authentication token verification failed. Please log in again.",
+                });
+              }
+            } else {
+              // In production, any failure of verifyFirebaseToken must reject the request outright.
+              console.error("[Auth] Production token verification failed:", tokenErr);
+              throw new TRPCError({
+                code: "UNAUTHORIZED",
+                message: "Authentication token verification failed. Please log in again.",
+              });
+            }
           }
 
           const phoneE164 = decodedToken.phone_number;
           if (!phoneE164) {
-            throw new Error("Phone number verification is required in Firebase token");
+            throw new TRPCError({
+              code: "BAD_REQUEST",
+              message: "Phone number verification is required in authentication token",
+            });
           }
 
           const db = await getDb();
-          let user;
-
           if (!db) {
-            console.warn("[Database] Database not connected. Using in-memory preview fallback.");
-            user = {
-              id: 9999,
-              openId: `firebase_${decodedToken.uid}`,
-              firebaseUid: decodedToken.uid,
-              phoneE164,
-              name: phoneE164.split("@")[0] || "Employee",
-              role: "admin" as const,
-              accountStatus: "active" as const,
-              dailyWage: 0,
-              managerId: null,
-              createdAt: new Date(),
-              updatedAt: new Date(),
-              lastSignedIn: new Date(),
-            };
-          } else {
-            try {
-              const invitation = await getActiveInvitationByPhone(phoneE164);
+            console.error("[Database] Database connection unavailable during user activation.");
+            throw new TRPCError({
+              code: "INTERNAL_SERVER_ERROR",
+              message: "Database connection unavailable. Please contact system administrator.",
+            });
+          }
 
-              if (invitation) {
-                user = await activateUserFromInvitation(
-                  invitation.id,
-                  decodedToken.uid,
-                  phoneE164,
-                  phoneE164.split("@")[0] || "Employee",
-                  invitation.role
-                );
-              } else {
-                user = await autoActivateUser(
-                  decodedToken.uid,
-                  phoneE164,
-                  phoneE164.split("@")[0] || "Employee"
-                );
-              }
-            } catch (dbError) {
-              console.warn("[Database] Query failed, falling back to in-memory preview user:", dbError);
-              user = {
-                id: 9999,
-                openId: `firebase_${decodedToken.uid}`,
-                firebaseUid: decodedToken.uid,
+          let user;
+          try {
+            const invitation = await getActiveInvitationByPhone(phoneE164);
+
+            if (invitation) {
+              user = await activateUserFromInvitation(
+                invitation.id,
+                decodedToken.uid,
                 phoneE164,
-                name: phoneE164.split("@")[0] || "Employee",
-                role: "admin" as const,
-                accountStatus: "active" as const,
-                dailyWage: 0,
-                managerId: null,
-                createdAt: new Date(),
-                updatedAt: new Date(),
-                lastSignedIn: new Date(),
-              };
+                phoneE164.split("@")[0] || "Employee",
+                invitation.role
+              );
+            } else {
+              user = await autoActivateUser(
+                decodedToken.uid,
+                phoneE164,
+                phoneE164.split("@")[0] || "Employee"
+              );
             }
+          } catch (dbError) {
+            console.error("[Database] Query failed during user activation:", dbError);
+            throw new TRPCError({
+              code: "INTERNAL_SERVER_ERROR",
+              message: "Database query failed during user activation. Please contact system administrator.",
+            });
           }
 
           if (!user) {
-            throw new Error("Failed to activate user account");
+            throw new TRPCError({
+              code: "INTERNAL_SERVER_ERROR",
+              message: "Failed to activate user account.",
+            });
           }
 
           const sessionToken = await sdk.createSessionToken(user.openId, {
             name: user.name || user.email || user.phoneE164 || "Employee",
+            sessionVersion: user.sessionVersion,
           });
 
           const cookieOptions = getSessionCookieOptions(ctx.req);
@@ -438,10 +450,10 @@ export const appRouter = router({
      * List tasks for today (or specified date).
      */
     listTodayTasks: protectedProcedure
-      .input(z.object({ date: z.string().optional() }))
+      .input(z.object({ date: z.string().optional() }).optional())
       .query(async ({ ctx, input }) => {
         const { getTasksForUser, getAllTasks, getTasksByManagerId } = await import("./db");
-        const todayStr = input.date || new Date().toISOString().slice(0, 10);
+        const todayStr = input?.date || new Date().toISOString().slice(0, 10);
         if (ctx.user.role === "admin") {
           return await getAllTasks(todayStr);
         } else if (ctx.user.role === "manager") {
@@ -480,6 +492,7 @@ export const appRouter = router({
           locationLng: z.string().optional(),
           locationAddress: z.string().optional(),
           customerName: z.string().optional(),
+          idempotencyKey: z.string().optional(),
         })
       )
       .mutation(async ({ ctx, input }) => {
@@ -514,10 +527,31 @@ export const appRouter = router({
     checkIn: protectedProcedure
       .input(
         z.object({
-          checkInPhotoUri: z.string().optional(),
-          checkInLat: z.string().optional(),
-          checkInLng: z.string().optional(),
+          checkInPhotoUri: z.string().min(1, "Photo evidence is required for check-in"),
+          checkInLat: z
+            .string()
+            .refine(
+              (val) => {
+                const n = parseFloat(val);
+                return !isNaN(n) && n >= -90 && n <= 90;
+              },
+              { message: "Invalid latitude: must be between -90 and 90 degrees." }
+            ),
+          checkInLng: z
+            .string()
+            .refine(
+              (val) => {
+                const n = parseFloat(val);
+                return !isNaN(n) && n >= -180 && n <= 180;
+              },
+              { message: "Invalid longitude: must be between -180 and 180 degrees." }
+            ),
           checkInAccuracy: z.number().optional(),
+          taskId: z.string().optional(),
+          targetLat: z.string().optional(),
+          targetLng: z.string().optional(),
+          geofenceRadiusMeters: z.number().optional(),
+          idempotencyKey: z.string().optional(),
         })
       )
       .mutation(async ({ ctx, input }) => {
@@ -528,7 +562,15 @@ export const appRouter = router({
           });
         }
         const { recordAttendanceCheckIn } = await import("./db");
-        return await recordAttendanceCheckIn(ctx.user, input);
+        try {
+          return await recordAttendanceCheckIn(ctx.user, input);
+        } catch (err: any) {
+          if (err instanceof TRPCError) throw err;
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: err?.message || "Failed to record check-in.",
+          });
+        }
       }),
 
     /**
@@ -553,6 +595,31 @@ export const appRouter = router({
       }),
 
     /**
+     * Manually approve a pending or review attendance record.
+     * Strictly restricted to Managers and Administrators.
+     */
+    approveCheckIn: protectedProcedure
+      .input(z.object({ recordId: z.string() }))
+      .mutation(async ({ ctx, input }) => {
+        if (ctx.user.role !== "admin" && ctx.user.role !== "manager") {
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "Forbidden: Only Managers and Administrators can approve attendance records.",
+          });
+        }
+        const { approveAttendanceRecord } = await import("./db");
+        try {
+          return await approveAttendanceRecord(ctx.user, input.recordId);
+        } catch (err: any) {
+          if (err instanceof TRPCError) throw err;
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: err?.message || "Failed to approve attendance record.",
+          });
+        }
+      }),
+
+    /**
      * Scoped attendance history query.
      */
     getHistory: protectedProcedure
@@ -561,11 +628,11 @@ export const appRouter = router({
           targetUserId: z.number().optional(),
           month: z.number().optional(),
           year: z.number().optional(),
-        })
+        }).optional()
       )
       .query(async ({ ctx, input }) => {
         const { getAttendanceRecords } = await import("./db");
-        return await getAttendanceRecords(ctx.user, input.targetUserId, input.month, input.year);
+        return await getAttendanceRecords(ctx.user, input?.targetUserId, input?.month, input?.year);
       }),
   }),
 
@@ -593,10 +660,23 @@ export const appRouter = router({
       .input(
         z.object({
           recordedDate: z.string(),
-          latitude: z.string(),
-          longitude: z.string(),
+          latitude: z.string().refine(
+            (val) => {
+              const n = parseFloat(val);
+              return !isNaN(n) && n >= -90 && n <= 90;
+            },
+            { message: "Invalid latitude: must be between -90 and 90 degrees." }
+          ),
+          longitude: z.string().refine(
+            (val) => {
+              const n = parseFloat(val);
+              return !isNaN(n) && n >= -180 && n <= 180;
+            },
+            { message: "Invalid longitude: must be between -180 and 180 degrees." }
+          ),
           accuracy: z.number().optional(),
           address: z.string().optional(),
+          taskId: z.string().optional(),
         })
       )
       .mutation(async ({ ctx, input }) => {
@@ -607,7 +687,15 @@ export const appRouter = router({
           });
         }
         const { recordGpsPoint } = await import("./db");
-        return await recordGpsPoint(ctx.user.id, input);
+        try {
+          return await recordGpsPoint(ctx.user.id, input);
+        } catch (err: any) {
+          if (err instanceof TRPCError) throw err;
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: err?.message || "Failed to record GPS point.",
+          });
+        }
       }),
   }),
 
@@ -658,6 +746,203 @@ export const appRouter = router({
         teamCompletedTasks: teamTasks.filter((t) => t.status === "COMPLETED").length,
       };
     }),
+  }),
+
+  customers: router({
+    list: protectedProcedure.query(async ({ ctx }) => {
+      const { listCustomers } = await import("./db");
+      return await listCustomers(ctx.user);
+    }),
+    create: protectedProcedure
+      .input(
+        z.object({
+          name: z.string().min(1),
+          phone: z.string().optional(),
+          email: z.string().email().optional().or(z.literal("")),
+          address: z.string().optional(),
+          latitude: z.string().optional(),
+          longitude: z.string().optional(),
+          notes: z.string().optional(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { createCustomer } = await import("./db");
+        return await createCustomer(ctx.user, input);
+      }),
+    update: protectedProcedure
+      .input(
+        z.object({
+          id: z.string(),
+          name: z.string().min(1).optional(),
+          phone: z.string().optional(),
+          email: z.string().optional(),
+          address: z.string().optional(),
+          latitude: z.string().optional(),
+          longitude: z.string().optional(),
+          notes: z.string().optional(),
+          status: z.enum(["active", "archived"]).optional(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { id, ...data } = input;
+        const { updateCustomer } = await import("./db");
+        return await updateCustomer(ctx.user, id, data);
+      }),
+  }),
+
+  visits: router({
+    list: protectedProcedure
+      .input(z.object({ date: z.string().optional(), customerId: z.string().optional() }).optional())
+      .query(async ({ ctx, input }) => {
+        const { listVisits } = await import("./db");
+        return await listVisits(ctx.user, input);
+      }),
+    getDetail: protectedProcedure
+      .input(z.object({ id: z.string() }))
+      .query(async ({ ctx, input }) => {
+        const { getVisitDetail } = await import("./db");
+        return await getVisitDetail(ctx.user, input.id);
+      }),
+    create: protectedProcedure
+      .input(
+        z.object({
+          customerId: z.string(),
+          employeeUserId: z.number().optional(),
+          scheduledFor: z.string(),
+          notes: z.string().optional(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { createVisit } = await import("./db");
+        return await createVisit(ctx.user, {
+          customerId: input.customerId,
+          employeeUserId: input.employeeUserId,
+          scheduledFor: new Date(input.scheduledFor),
+          notes: input.notes,
+        });
+      }),
+    checkIn: protectedProcedure
+      .input(
+        z.object({
+          visitId: z.string(),
+          latitude: z.string().optional(),
+          longitude: z.string().optional(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { checkInVisit } = await import("./db");
+        return await checkInVisit(ctx.user, input.visitId, {
+          latitude: input.latitude,
+          longitude: input.longitude,
+        });
+      }),
+    complete: protectedProcedure
+      .input(
+        z.object({
+          visitId: z.string(),
+          latitude: z.string().optional(),
+          longitude: z.string().optional(),
+          meetingOutcome: z.string().optional(),
+          notes: z.string().optional(),
+          followUpDate: z.string().optional(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { completeVisit } = await import("./db");
+        return await completeVisit(ctx.user, input.visitId, {
+          latitude: input.latitude,
+          longitude: input.longitude,
+          meetingOutcome: input.meetingOutcome,
+          notes: input.notes,
+          followUpDate: input.followUpDate,
+        });
+      }),
+    addEvidence: protectedProcedure
+      .input(
+        z.object({
+          visitId: z.string(),
+          evidenceUrl: z.string(),
+          latitude: z.string().optional(),
+          longitude: z.string().optional(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { addVisitEvidence } = await import("./db");
+        return await addVisitEvidence(ctx.user, input.visitId, input);
+      }),
+  }),
+
+  chat: router({
+    getOrCreateChannel: protectedProcedure
+      .input(z.object({ targetUserId: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        const { getOrCreateDirectChannel } = await import("./db");
+        return await getOrCreateDirectChannel(ctx.user, input.targetUserId);
+      }),
+    getMessages: protectedProcedure
+      .input(z.object({ channelId: z.string(), limit: z.number().optional() }))
+      .query(async ({ ctx, input }) => {
+        const { getChannelMessages } = await import("./db");
+        return await getChannelMessages(ctx.user, input.channelId, input.limit);
+      }),
+    sendMessage: protectedProcedure
+      .input(z.object({ channelId: z.string(), message: z.string().min(1) }))
+      .mutation(async ({ ctx, input }) => {
+        const { sendChatMessage } = await import("./db");
+        return await sendChatMessage(ctx.user, input.channelId, input.message);
+      }),
+  }),
+
+  expenses: router({
+    list: protectedProcedure.query(async ({ ctx }) => {
+      const { listExpenses } = await import("./db");
+      return await listExpenses(ctx.user);
+    }),
+    create: protectedProcedure
+      .input(
+        z.object({
+          amount: z.number().positive(),
+          category: z.string().min(1),
+          description: z.string().optional(),
+          receiptUrl: z.string().optional(),
+          expenseDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { createExpense } = await import("./db");
+        return await createExpense(ctx.user, input);
+      }),
+    review: protectedProcedure
+      .input(
+        z.object({
+          expenseId: z.string(),
+          decision: z.enum(["APPROVED", "REJECTED"]),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { reviewExpense } = await import("./db");
+        return await reviewExpense(ctx.user, input.expenseId, input.decision);
+      }),
+  }),
+
+  notifications: router({
+    list: protectedProcedure.query(async ({ ctx }) => {
+      const { getUserNotifications } = await import("./db");
+      return await getUserNotifications(ctx.user.id);
+    }),
+    registerDevice: protectedProcedure
+      .input(
+        z.object({
+          expoPushToken: z.string().optional(),
+          deviceModel: z.string().optional(),
+          osVersion: z.string().optional(),
+          appVersion: z.string().optional(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { registerDeviceSession } = await import("./db");
+        return await registerDeviceSession(ctx.user.id, input);
+      }),
   }),
 });
 

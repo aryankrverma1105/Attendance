@@ -36,6 +36,7 @@ describe("End-to-End Enterprise Workflow Test (Admin -> Manager -> Employee -> M
     createdAt: new Date(),
     updatedAt: new Date(),
     lastSignedIn: new Date(),
+    sessionVersion: 1,
   };
 
   const managerUser: AuthenticatedUser = {
@@ -53,6 +54,7 @@ describe("End-to-End Enterprise Workflow Test (Admin -> Manager -> Employee -> M
     createdAt: new Date(),
     updatedAt: new Date(),
     lastSignedIn: new Date(),
+    sessionVersion: 1,
   };
 
   const employeeUser: AuthenticatedUser = {
@@ -70,6 +72,7 @@ describe("End-to-End Enterprise Workflow Test (Admin -> Manager -> Employee -> M
     createdAt: new Date(),
     updatedAt: new Date(),
     lastSignedIn: new Date(),
+    sessionVersion: 1,
   };
 
   it("Executes Stage 1: Admin configures workforce and oversees organization", async () => {

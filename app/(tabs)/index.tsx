@@ -3,7 +3,7 @@ import { Linking, Platform, Pressable, ScrollView, StyleSheet, Text, View } from
 import { useRouter } from "expo-router";
 import MaterialIcons from "@expo/vector-icons/MaterialIcons";
 
-import { FieldButton, MetricCard, SectionHeading, StatusChip, Surface } from "@/components/field-ui";
+import { FieldButton, MetricCard, OfflineSyncStatusBadge, SectionHeading, StatusChip, Surface } from "@/components/field-ui";
 import { ScreenContainer } from "@/components/screen-container";
 import {
   calculateEarnings,
@@ -58,6 +58,9 @@ export default function HomeScreen() {
     if (user?.role === "admin" || user?.identifier?.includes("9835916278")) {
       return "Aryan Kumar Verma";
     }
+    if (user?.role === "manager") {
+      return "Field Manager";
+    }
     return "Technician";
   }, [managedUser, user]);
 
@@ -68,7 +71,17 @@ export default function HomeScreen() {
   const isShiftComplete = Boolean(todayAttendance && todayAttendance.checkOutAt);
   const needsCheckout = Boolean(todayAttendance && !todayAttendance.checkOutAt);
 
-  // Employee-specific worked days and earnings calculation
+  // Server queries for real-time data
+  const employeeDashboardQuery = trpc.workforce.getEmployeeDashboard.useQuery(undefined, {
+    enabled: Boolean(isEmployee && user),
+    refetchInterval: 15000,
+  });
+
+  const todayTasksQuery = trpc.tasks.listTodayTasks.useQuery(undefined, {
+    refetchInterval: 15000,
+  });
+
+  // Employee-specific worked days and earnings calculation (local fallback)
   const employeeAttendance = useMemo(
     () =>
       data.attendance.filter(
@@ -77,21 +90,26 @@ export default function HomeScreen() {
     [data.attendance, user?.id]
   );
 
-  const { workedDays } = useMemo(
+  const { workedDays: localWorkedDays } = useMemo(
     () => calculateWorkedDays(employeeAttendance, currentMonth, currentYear),
     [employeeAttendance, currentMonth, currentYear]
   );
 
-  const workingDaysInMonth = useMemo(
+  const localWorkingDaysInMonth = useMemo(
     () => calculateWorkingDaysInMonth(currentYear, currentMonth),
     [currentYear, currentMonth]
   );
 
   const userDailyWage = isEmployee ? (user?.dailyWage ?? 0) : 0;
-  const calculatedEarnings = useMemo(
-    () => (isEmployee ? calculateEarnings(workedDays, userDailyWage) : 0),
-    [isEmployee, workedDays, userDailyWage]
+  const localCalculatedEarnings = useMemo(
+    () => (isEmployee ? calculateEarnings(localWorkedDays, userDailyWage) : 0),
+    [isEmployee, localWorkedDays, userDailyWage]
   );
+
+  // Authoritative server values when available, local fallback otherwise
+  const workedDays = employeeDashboardQuery.data?.workedDays ?? localWorkedDays;
+  const workingDaysInMonth = employeeDashboardQuery.data?.workingDaysInMonth ?? localWorkingDaysInMonth;
+  const calculatedEarnings = employeeDashboardQuery.data?.calculatedEarnings ?? localCalculatedEarnings;
 
   // Visits
   const todaysVisits = useMemo(
@@ -110,8 +128,26 @@ export default function HomeScreen() {
     return [];
   }, [data.managedUsers, isAdmin, isManager, user?.id]);
 
-  // Tasks: Today's Tasks
+  // Tasks: Today's Tasks (Server-first if available)
   const todaysTasks = useMemo(() => {
+    if (todayTasksQuery.data) {
+      return todayTasksQuery.data.map((t) => ({
+        id: String(t.id),
+        title: t.title,
+        customerName: t.customerName ?? undefined,
+        locationAddress: t.locationAddress ?? undefined,
+        locationLat: t.locationLat ? String(t.locationLat) : undefined,
+        locationLng: t.locationLng ? String(t.locationLng) : undefined,
+        assignedToUserId: String(t.assignedToUserId),
+        assignedToName: (t as any).assignedToName ?? undefined,
+        assignedByUserId: t.assignedByUserId ? String(t.assignedByUserId) : undefined,
+        scheduledDate: t.scheduledDate,
+        status: t.status as TaskStatus,
+        priority: (t.priority === "URGENT" || t.priority === "HIGH" ? "urgent" : "normal") as "normal" | "urgent",
+        createdAt: t.createdAt ? new Date(t.createdAt).toISOString() : new Date().toISOString(),
+      }));
+    }
+
     return data.tasks.filter((t) => {
       const isToday = t.scheduledDate === todayDateStr || t.scheduledDate === today;
       if (isEmployee) {
@@ -122,7 +158,7 @@ export default function HomeScreen() {
       }
       return isToday;
     });
-  }, [data.tasks, data.managedUsers, isEmployee, isManager, user?.id, todayDateStr, today]);
+  }, [todayTasksQuery.data, data.tasks, data.managedUsers, isEmployee, isManager, user?.id, todayDateStr, today]);
 
   const activeFieldWorkers = useMemo(() => {
     return data.managedUsers.filter((u) => {
@@ -143,15 +179,9 @@ export default function HomeScreen() {
     }, 0);
   }, [data.managedUsers, data.attendance, currentMonth, currentYear]);
 
-  // tRPC mutation for task status update
-  const serverUpdateStatus = trpc.tasks.updateStatus.useMutation();
-
   const handleStatusTransition = async (taskId: string, nextStatus: TaskStatus) => {
-    updateTaskStatus(taskId, nextStatus);
-    await serverUpdateStatus.mutateAsync({
-      taskId: taskId,
-      status: nextStatus,
-    }).catch((err: unknown) => console.warn("[Tasks] Status sync queued:", err));
+    await updateTaskStatus(taskId, nextStatus);
+    todayTasksQuery.refetch();
   };
 
   const openNavigation = (lat?: string, lng?: string, address?: string) => {
@@ -439,6 +469,10 @@ export default function HomeScreen() {
                   {new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" })}
                 </Text>
               </View>
+              <OfflineSyncStatusBadge
+                pendingCount={data.offlineQueue.length}
+                onPress={() => router.push("/offline-queue" as any)}
+              />
             </View>
 
             {/* Solar Attendance Card */}
@@ -480,17 +514,28 @@ export default function HomeScreen() {
                   variant="secondary"
                 />
               ) : (
-                <FieldButton
-                  icon={needsCheckout ? "logout" : "login"}
-                  label={needsCheckout ? "Check out for today" : "Check in with GPS"}
-                  onPress={() =>
-                    router.push({
-                      pathname: "/attendance",
-                      params: { action: needsCheckout ? "check-out" : "check-in" },
-                    })
-                  }
-                  variant={needsCheckout ? "secondary" : "primary"}
-                />
+                <>
+                  <FieldButton
+                    icon={needsCheckout ? "logout" : "login"}
+                    label={needsCheckout ? "Check out for today" : "Check in with GPS"}
+                    onPress={() =>
+                      router.push({
+                        pathname: "/attendance",
+                        params: { action: needsCheckout ? "check-out" : "check-in" },
+                      })
+                    }
+                    variant={needsCheckout ? "secondary" : "primary"}
+                  />
+
+                  {needsCheckout ? (
+                    <View style={styles.batteryHelpRow}>
+                      <MaterialIcons color="#D97706" name="battery-saver" size={14} />
+                      <Text style={styles.batteryHelpText}>
+                        Tip: On Xiaomi/Samsung, disable battery optimization ("Don't Optimize") in App Settings to ensure uninterrupted route tracking while locked.
+                      </Text>
+                    </View>
+                  ) : null}
+                </>
               )}
             </Surface>
 
@@ -758,4 +803,22 @@ const styles = StyleSheet.create({
     borderRadius: 8,
   },
   completeTaskBtnText: { color: "#FFFFFF", fontSize: 11, fontWeight: "800" },
+  batteryHelpRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 6,
+    backgroundColor: "#FFFBEB",
+    borderWidth: 1,
+    borderColor: "#FDE68A",
+    borderRadius: 8,
+    padding: 8,
+    marginTop: 6,
+  },
+  batteryHelpText: {
+    color: "#92400E",
+    fontSize: 11,
+    lineHeight: 15,
+    flex: 1,
+    fontWeight: "500",
+  },
 });

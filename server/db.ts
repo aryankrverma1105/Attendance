@@ -1,38 +1,75 @@
 import dotenv from "dotenv";
 dotenv.config();
 
-import { and, desc, eq, gte, lte, sql } from "drizzle-orm";
+import { and, desc, eq, gte, lte, or, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import {
   accountActionOutbox,
   accountInvitations,
   attendanceRecords,
   auditEvents,
+  chatChannels,
+  DbChatChannel,
+  chatMessages,
+  DbChatMessage,
+  customers,
+  DbCustomer,
+  deviceSessions,
+  DbDeviceSession,
   employeeWages,
   EmployeeWage,
+  expenses,
+  DbExpense,
   gpsPoints,
   DbGpsPoint,
+  notifications,
+  DbNotification,
   tasks,
   DbTask,
   InsertUser,
   User,
   users,
+  visitEvidence,
+  DbVisitEvidence,
+  visits,
+  DbVisit,
 } from "../drizzle/schema";
 import { ENV } from "./_core/env";
 
+import mysql from "mysql2";
+
+let _pool: mysql.Pool | null = null;
 let _db: ReturnType<typeof drizzle> | null = null;
 
-// Lazily create the drizzle instance so local tooling can run without a DB.
+// Lazily create the drizzle instance with resilient connection pool.
 export async function getDb() {
   if (!_db && process.env.DATABASE_URL) {
     try {
-      _db = drizzle(process.env.DATABASE_URL);
+      const isProd = process.env.NODE_ENV === "production";
+      const useSsl = process.env.DATABASE_SSL === "true";
+      
+      _pool = mysql.createPool({
+        uri: process.env.DATABASE_URL,
+        connectionLimit: Number(process.env.DB_CONNECTION_LIMIT) || 10,
+        waitForConnections: true,
+        queueLimit: 0,
+        connectTimeout: 10000,
+        enableKeepAlive: true,
+        keepAliveInitialDelay: 10000,
+        ssl: useSsl ? { rejectUnauthorized: process.env.DATABASE_SSL_STRICT === "true" } : undefined,
+      });
+
+      _db = drizzle(_pool);
     } catch (error) {
       console.warn("[Database] Failed to connect:", error);
       _db = null;
     }
   }
   return _db;
+}
+
+export function setDbForTesting(mockDb: any) {
+  _db = mockDb;
 }
 
 export async function upsertUser(user: InsertUser): Promise<void> {
@@ -228,7 +265,13 @@ export async function autoActivateUser(firebaseUid: string, phoneE164: string, n
     }
 
     const allUsers = await tx.select().from(users).limit(1);
-    const role = allUsers.length === 0 ? "admin" : "employee";
+    const allowBootstrap = process.env.ALLOW_FIRST_USER_BOOTSTRAP === "true";
+    const isFirstUser = allUsers.length === 0;
+    const role = isFirstUser && allowBootstrap ? "admin" : "employee";
+
+    if (isFirstUser && allowBootstrap) {
+      console.warn(`[Bootstrap] Initializing first user ${phoneE164} as administrator via ALLOW_FIRST_USER_BOOTSTRAP flag.`);
+    }
 
     const [insertResult] = await tx.insert(users).values({
       openId,
@@ -238,6 +281,7 @@ export async function autoActivateUser(firebaseUid: string, phoneE164: string, n
       role,
       accountStatus: "active",
       lastSignedIn: signedInAt,
+      sessionVersion: 1,
     });
 
     const userId = insertResult.insertId;
@@ -247,8 +291,10 @@ export async function autoActivateUser(firebaseUid: string, phoneE164: string, n
       id: auditId,
       actorUserOpenId: openId,
       subjectUserOpenId: openId,
-      action: "account.auto_activated",
-      detail: `Auto-activated first-time or dev account for phone ${phoneE164} as role ${role}`,
+      action: isFirstUser && allowBootstrap ? "account.bootstrap_first_admin" : "account.auto_activated",
+      detail: isFirstUser && allowBootstrap
+        ? `Explicit first-user bootstrap granted Admin role to phone ${phoneE164}`
+        : `Auto-activated account for phone ${phoneE164} as role ${role}`,
     });
 
     const activeUser = await tx.select().from(users).where(eq(users.id, userId)).limit(1);
@@ -292,8 +338,7 @@ export async function updateUserDailyWage(
 
   const db = await getDb();
   if (!db) {
-    console.warn("[Database] Cannot update wage: database not available");
-    return { success: true, updatedWage: newDailyWage };
+    throw new Error("Database unavailable. Cannot update employee daily wage.");
   }
 
   const targetUser = await getUserById(targetUserId);
@@ -530,6 +575,7 @@ export async function createTask(
     locationLng?: string;
     locationAddress?: string;
     customerName?: string;
+    idempotencyKey?: string;
   }
 ): Promise<DbTask> {
   if (actorUser.role !== "admin" && actorUser.role !== "manager") {
@@ -554,7 +600,16 @@ export async function createTask(
     throw new Error("Database unavailable.");
   }
 
-  const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  if (input.idempotencyKey) {
+    const existing = await db.select().from(tasks).where(eq(tasks.id, input.idempotencyKey)).limit(1);
+    if (existing.length > 0) {
+      return existing[0];
+    }
+  }
+
+  const taskId = input.idempotencyKey && input.idempotencyKey.length <= 36
+    ? input.idempotencyKey
+    : `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   await db.insert(tasks).values({
     id: taskId,
     title: input.title.trim(),
@@ -658,10 +713,74 @@ export async function recordGpsPoint(
     longitude: string;
     accuracy?: number;
     address?: string;
+    taskId?: string;
   }
 ): Promise<DbGpsPoint> {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable.");
+
+  const lat = parseFloat(point.latitude);
+  const lng = parseFloat(point.longitude);
+
+  // 1. Basic server-side coordinates sanity checks
+  if (isNaN(lat) || lat < -90 || lat > 90) {
+    throw new Error("Invalid latitude: must be between -90 and 90 degrees.");
+  }
+  if (isNaN(lng) || lng < -180 || lng > 180) {
+    throw new Error("Invalid longitude: must be between -180 and 180 degrees.");
+  }
+
+  // 2. Worksite geofence check if assigned to a task
+  if (point.taskId) {
+    const taskList = await db.select().from(tasks).where(eq(tasks.id, point.taskId)).limit(1);
+    if (taskList.length > 0 && taskList[0].locationLat && taskList[0].locationLng) {
+      const taskLat = parseFloat(taskList[0].locationLat);
+      const taskLng = parseFloat(taskList[0].locationLng);
+      if (!isNaN(taskLat) && !isNaN(taskLng)) {
+        const distToTask = haversineDistanceMeters(lat, lng, taskLat, taskLng);
+        const allowedRadius = Number(process.env.MAX_WORKSITE_RADIUS_METERS) || 500;
+        if (distToTask > allowedRadius) {
+          throw new Error(
+            `Location verification failed: point is ${distToTask}m away from task worksite, exceeding maximum radius of ${allowedRadius}m.`
+          );
+        }
+      }
+    }
+  }
+
+  // 3. Speed-plausibility check between consecutive GPS points for the same user/day
+  const previousPoints = await db
+    .select()
+    .from(gpsPoints)
+    .where(
+      and(
+        eq(gpsPoints.userId, userId),
+        eq(gpsPoints.recordedDate, point.recordedDate)
+      )
+    )
+    .orderBy(desc(gpsPoints.recordedAt))
+    .limit(1);
+
+  if (previousPoints.length > 0) {
+    const prev = previousPoints[0];
+    const prevLat = parseFloat(prev.latitude);
+    const prevLng = parseFloat(prev.longitude);
+    if (!isNaN(prevLat) && !isNaN(prevLng)) {
+      const distanceMeters = haversineDistanceMeters(prevLat, prevLng, lat, lng);
+      const prevTimeMs = new Date(prev.recordedAt).getTime();
+      const timeDiffSec = Math.max((Date.now() - prevTimeMs) / 1000, 0.1);
+
+      if (distanceMeters > 50) {
+        const speedKmH = (distanceMeters / timeDiffSec) * 3.6;
+        const MAX_SPEED_KMH = 150;
+        if (speedKmH > MAX_SPEED_KMH) {
+          throw new Error(
+            `GPS speed check failed: implied speed of ${Math.round(speedKmH)} km/h exceeds maximum plausible speed limit of ${MAX_SPEED_KMH} km/h.`
+          );
+        }
+      }
+    }
+  }
 
   const id = `gps-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   await db.insert(gpsPoints).values({
@@ -761,6 +880,11 @@ export async function updateUserStatusByAdmin(
   if (input.role) updates.role = input.role;
   if (input.managerId !== undefined) updates.managerId = input.managerId;
 
+  // Invalidate existing sessions if role or status is changed
+  if (input.accountStatus || input.role) {
+    updates.sessionVersion = (targetUser.sessionVersion || 1) + 1;
+  }
+
   await db.update(users).set(updates).where(eq(users.id, input.targetUserId));
 
   // Create audit event
@@ -778,7 +902,30 @@ export async function updateUserStatusByAdmin(
 }
 
 /**
- * Server-side Attendance Verification System
+ * Calculate distance between two GPS coordinates in meters using Haversine formula.
+ */
+export function haversineDistanceMeters(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number
+): number {
+  const R = 6371e3; // Earth radius in meters
+  const phi1 = (lat1 * Math.PI) / 180;
+  const phi2 = (lat2 * Math.PI) / 180;
+  const deltaPhi = ((lat2 - lat1) * Math.PI) / 180;
+  const deltaLambda = ((lon2 - lon1) * Math.PI) / 180;
+
+  const a =
+    Math.sin(deltaPhi / 2) * Math.sin(deltaPhi / 2) +
+    Math.cos(phi1) * Math.cos(phi2) * Math.sin(deltaLambda / 2) * Math.sin(deltaLambda / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+  return Math.round(R * c);
+}
+
+/**
+ * Server-side Attendance Verification System with Geofencing, Mock Detection & Idempotency.
  */
 export async function recordAttendanceCheckIn(
   employeeUser: User,
@@ -787,6 +934,14 @@ export async function recordAttendanceCheckIn(
     checkInLat?: string;
     checkInLng?: string;
     checkInAccuracy?: number;
+    operationId?: string;
+    clientCheckInAt?: string;
+    isMocked?: boolean;
+    targetLat?: string;
+    targetLng?: string;
+    geofenceRadiusMeters?: number;
+    taskId?: string;
+    idempotencyKey?: string;
   }
 ): Promise<any> {
   if (employeeUser.role !== "employee") {
@@ -796,14 +951,100 @@ export async function recordAttendanceCheckIn(
   const db = await getDb();
   if (!db) throw new Error("Database unavailable.");
 
-  const id = `att-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  if (input.idempotencyKey) {
+    const existing = await db.select().from(attendanceRecords).where(eq(attendanceRecords.id, input.idempotencyKey)).limit(1);
+    if (existing.length > 0) {
+      return existing[0];
+    }
+  }
+
+  // 0. Lat/Lng Sanity Validation
+  if (input.checkInLat !== undefined && input.checkInLat !== null && input.checkInLat !== "") {
+    const lat = parseFloat(input.checkInLat);
+    if (isNaN(lat) || lat < -90 || lat > 90) {
+      throw new Error("Invalid latitude: must be between -90 and 90 degrees.");
+    }
+  }
+  if (input.checkInLng !== undefined && input.checkInLng !== null && input.checkInLng !== "") {
+    const lng = parseFloat(input.checkInLng);
+    if (isNaN(lng) || lng < -180 || lng > 180) {
+      throw new Error("Invalid longitude: must be between -180 and 180 degrees.");
+    }
+  }
+
   const now = new Date();
+
+  // 1. Reject duplicate open check-ins: an employee with an existing record today with no checkOutAt
+  const todayStr = now.toISOString().slice(0, 10);
+  const startOfDay = new Date(`${todayStr}T00:00:00.000Z`);
+  const recentRecords = await db
+    .select()
+    .from(attendanceRecords)
+    .where(
+      and(
+        eq(attendanceRecords.userId, employeeUser.id),
+        gte(attendanceRecords.checkInAt, startOfDay)
+      )
+    )
+    .orderBy(desc(attendanceRecords.checkInAt));
+
+  const openRecord = recentRecords.find((r) => !r.checkOutAt);
+  if (openRecord) {
+    throw new Error("Active check-in already in progress. You must check out before checking in again.");
+  }
+
+  const id = input.idempotencyKey && input.idempotencyKey.length <= 36
+    ? input.idempotencyKey
+    : `att-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  // 2. Mock GPS & Accuracy validation (independently configurable on server)
+  const MAX_GPS_ACCURACY_METERS = Number(process.env.MAX_GPS_ACCURACY_METERS) || 150;
+  const DEFAULT_GEOFENCE_RADIUS_METERS = Number(process.env.DEFAULT_GEOFENCE_RADIUS_METERS) || 500;
+
+  let isMockedFlag = input.isMocked ? 1 : 0;
+  // Default to "pending" instead of "verified"
+  let status: "verified" | "review" | "pending" = "pending";
+
+  // 3. Worksite / Task Geofence Validation
+  let targetLat = input.targetLat;
+  let targetLng = input.targetLng;
+  if (input.taskId && (!targetLat || !targetLng)) {
+    const taskRecord = await db.select().from(tasks).where(eq(tasks.id, input.taskId)).limit(1);
+    if (taskRecord.length > 0 && taskRecord[0].locationLat && taskRecord[0].locationLng) {
+      targetLat = taskRecord[0].locationLat;
+      targetLng = taskRecord[0].locationLng;
+    }
+  }
+
+  if (input.checkInLat && input.checkInLng && targetLat && targetLng) {
+    const empLat = parseFloat(input.checkInLat);
+    const empLng = parseFloat(input.checkInLng);
+    const tgtLat = parseFloat(targetLat);
+    const tgtLng = parseFloat(targetLng);
+
+    if (!isNaN(empLat) && !isNaN(empLng) && !isNaN(tgtLat) && !isNaN(tgtLng)) {
+      const distance = haversineDistanceMeters(empLat, empLng, tgtLat, tgtLng);
+      const allowedRadius = input.geofenceRadiusMeters || DEFAULT_GEOFENCE_RADIUS_METERS;
+      if (distance <= allowedRadius) {
+        status = "verified";
+      } else {
+        status = "review";
+      }
+    }
+  }
+
+  if (input.checkInAccuracy && input.checkInAccuracy > MAX_GPS_ACCURACY_METERS) {
+    status = "review";
+  }
+  if (isMockedFlag === 1) {
+    status = "review";
+  }
 
   await db.insert(attendanceRecords).values({
     id,
     userId: employeeUser.id,
     checkInAt: now,
-    status: "verified",
+    status,
     checkInPhotoUri: input.checkInPhotoUri,
     checkInLat: input.checkInLat,
     checkInLng: input.checkInLng,
@@ -814,10 +1055,58 @@ export async function recordAttendanceCheckIn(
   return record[0];
 }
 
+/**
+ * Manually approve a pending or review attendance record (Manager or Admin only).
+ */
+export async function approveAttendanceRecord(
+  actorUser: User,
+  recordId: string
+): Promise<{ success: boolean; record: any }> {
+  if (actorUser.role !== "admin" && actorUser.role !== "manager") {
+    throw new Error("Forbidden: Only Managers and Administrators can approve attendance records.");
+  }
+
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable.");
+
+  const existing = await db
+    .select()
+    .from(attendanceRecords)
+    .where(eq(attendanceRecords.id, recordId))
+    .limit(1);
+
+  if (existing.length === 0) {
+    throw new Error("Attendance record not found.");
+  }
+
+  const record = existing[0];
+  if (actorUser.role === "manager") {
+    const targetEmployee = await getUserById(record.userId);
+    if (targetEmployee?.managerId !== actorUser.id) {
+      throw new Error("Forbidden: You can only approve attendance records for your team members.");
+    }
+  }
+
+  await db
+    .update(attendanceRecords)
+    .set({ status: "verified" })
+    .where(eq(attendanceRecords.id, recordId));
+
+  const updated = await db
+    .select()
+    .from(attendanceRecords)
+    .where(eq(attendanceRecords.id, recordId))
+    .limit(1);
+
+  return { success: true, record: updated[0] };
+}
+
 export async function recordAttendanceCheckOut(
   employeeUser: User,
   input: {
     checkOutPhotoUri?: string;
+    clientCheckOutAt?: string;
+    operationId?: string;
   }
 ): Promise<any> {
   if (employeeUser.role !== "employee") {
@@ -827,7 +1116,7 @@ export async function recordAttendanceCheckOut(
   const db = await getDb();
   if (!db) throw new Error("Database unavailable.");
 
-  // Find latest active attendance record for this user today
+  // Find latest active attendance record for this user
   const activeRecords = await db
     .select()
     .from(attendanceRecords)
@@ -885,6 +1174,508 @@ export async function getAttendanceRecords(
 }
 
 /**
+ * Customers Management
+ */
+export async function createCustomer(
+  actorUser: User,
+  input: {
+    name: string;
+    phone?: string;
+    email?: string;
+    address?: string;
+    latitude?: string;
+    longitude?: string;
+    notes?: string;
+  }
+): Promise<DbCustomer> {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable.");
+
+  const customerId = `cust-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  await db.insert(customers).values({
+    id: customerId,
+    name: input.name.trim(),
+    phone: input.phone?.trim(),
+    email: input.email?.trim(),
+    address: input.address?.trim(),
+    latitude: input.latitude,
+    longitude: input.longitude,
+    notes: input.notes?.trim(),
+    createdByUserId: actorUser.id,
+    status: "active",
+  });
+
+  const created = await db.select().from(customers).where(eq(customers.id, customerId)).limit(1);
+  return created[0];
+}
+
+export async function updateCustomer(
+  actorUser: User,
+  customerId: string,
+  input: Partial<{
+    name: string;
+    phone: string;
+    email: string;
+    address: string;
+    latitude: string;
+    longitude: string;
+    notes: string;
+    status: "active" | "archived";
+  }>
+): Promise<DbCustomer> {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable.");
+
+  const existing = await db.select().from(customers).where(eq(customers.id, customerId)).limit(1);
+  if (existing.length === 0) throw new Error("Customer not found.");
+
+  await db.update(customers).set(input).where(eq(customers.id, customerId));
+  const updated = await db.select().from(customers).where(eq(customers.id, customerId)).limit(1);
+  return updated[0];
+}
+
+export async function listCustomers(actorUser: User): Promise<DbCustomer[]> {
+  const db = await getDb();
+  if (!db) return [];
+
+  return await db
+    .select()
+    .from(customers)
+    .where(eq(customers.status, "active"))
+    .orderBy(desc(customers.createdAt));
+}
+
+/**
+ * Customer Visits Management
+ */
+export async function createVisit(
+  actorUser: User,
+  input: {
+    customerId: string;
+    employeeUserId?: number;
+    scheduledFor: Date;
+    notes?: string;
+  }
+): Promise<DbVisit> {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable.");
+
+  const assignedEmployeeId = input.employeeUserId || actorUser.id;
+
+  // RBAC validation:
+  if (actorUser.role === "employee" && assignedEmployeeId !== actorUser.id) {
+    throw new Error("Forbidden: Field employees can only schedule visits for themselves.");
+  }
+  if (actorUser.role === "manager") {
+    const targetUser = await getUserById(assignedEmployeeId);
+    if (targetUser?.managerId !== actorUser.id && assignedEmployeeId !== actorUser.id) {
+      throw new Error("Forbidden: Managers can only schedule visits for members of their team.");
+    }
+  }
+
+  const visitId = `visit-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  await db.insert(visits).values({
+    id: visitId,
+    customerId: input.customerId,
+    employeeUserId: assignedEmployeeId,
+    scheduledFor: input.scheduledFor,
+    status: "SCHEDULED",
+    notes: input.notes,
+  });
+
+  const created = await db.select().from(visits).where(eq(visits.id, visitId)).limit(1);
+  return created[0];
+}
+
+export async function checkInVisit(
+  actorUser: User,
+  visitId: string,
+  input: {
+    latitude?: string;
+    longitude?: string;
+  }
+): Promise<DbVisit> {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable.");
+
+  const existing = await db.select().from(visits).where(eq(visits.id, visitId)).limit(1);
+  if (existing.length === 0) throw new Error("Visit not found.");
+
+  const visit = existing[0];
+  if (actorUser.role === "employee" && visit.employeeUserId !== actorUser.id) {
+    throw new Error("Forbidden: You can only check in to your own assigned visits.");
+  }
+
+  const now = new Date();
+  await db
+    .update(visits)
+    .set({
+      status: "IN_PROGRESS",
+      checkInAt: now,
+      checkInLat: input.latitude,
+      checkInLng: input.longitude,
+    })
+    .where(eq(visits.id, visitId));
+
+  const updated = await db.select().from(visits).where(eq(visits.id, visitId)).limit(1);
+  return updated[0];
+}
+
+export async function completeVisit(
+  actorUser: User,
+  visitId: string,
+  input: {
+    latitude?: string;
+    longitude?: string;
+    meetingOutcome?: string;
+    notes?: string;
+    followUpDate?: string;
+  }
+): Promise<DbVisit> {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable.");
+
+  const existing = await db.select().from(visits).where(eq(visits.id, visitId)).limit(1);
+  if (existing.length === 0) throw new Error("Visit not found.");
+
+  const visit = existing[0];
+  if (actorUser.role === "employee" && visit.employeeUserId !== actorUser.id) {
+    throw new Error("Forbidden: You can only complete your own assigned visits.");
+  }
+
+  const now = new Date();
+  await db
+    .update(visits)
+    .set({
+      status: "COMPLETED",
+      checkOutAt: now,
+      checkOutLat: input.latitude,
+      checkOutLng: input.longitude,
+      meetingOutcome: input.meetingOutcome,
+      notes: input.notes,
+      followUpDate: input.followUpDate,
+    })
+    .where(eq(visits.id, visitId));
+
+  const updated = await db.select().from(visits).where(eq(visits.id, visitId)).limit(1);
+  return updated[0];
+}
+
+export async function addVisitEvidence(
+  actorUser: User,
+  visitId: string,
+  input: {
+    evidenceUrl: string;
+    latitude?: string;
+    longitude?: string;
+  }
+): Promise<DbVisitEvidence> {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable.");
+
+  const evidenceId = `evid-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  await db.insert(visitEvidence).values({
+    id: evidenceId,
+    visitId,
+    evidenceUrl: input.evidenceUrl,
+    latitude: input.latitude,
+    longitude: input.longitude,
+  });
+
+  const created = await db.select().from(visitEvidence).where(eq(visitEvidence.id, evidenceId)).limit(1);
+  return created[0];
+}
+
+export async function listVisits(
+  actorUser: User,
+  options?: {
+    date?: string;
+    customerId?: string;
+  }
+): Promise<Array<DbVisit & { customerName?: string; evidenceCount?: number }>> {
+  const db = await getDb();
+  if (!db) return [];
+
+  let query = db.select().from(visits);
+
+  let rawVisits: DbVisit[];
+  if (actorUser.role === "admin") {
+    rawVisits = await query.orderBy(desc(visits.scheduledFor));
+  } else if (actorUser.role === "manager") {
+    const team = await getUsersByManagerId(actorUser.id);
+    const teamIds = [actorUser.id, ...team.map((t) => t.id)];
+    rawVisits = (await query.orderBy(desc(visits.scheduledFor))).filter((v) => teamIds.includes(v.employeeUserId));
+  } else {
+    rawVisits = await db
+      .select()
+      .from(visits)
+      .where(eq(visits.employeeUserId, actorUser.id))
+      .orderBy(desc(visits.scheduledFor));
+  }
+
+  // Enrich with customer name
+  const allCustomers = await db.select().from(customers);
+  const custMap = new Map<string, string>();
+  allCustomers.forEach((c) => custMap.set(c.id, c.name));
+
+  return rawVisits.map((v) => ({
+    ...v,
+    customerName: custMap.get(v.customerId) || "Customer",
+  }));
+}
+
+export async function getVisitDetail(
+  actorUser: User,
+  visitId: string
+): Promise<{ visit: DbVisit; customer?: DbCustomer; evidence: DbVisitEvidence[] } | null> {
+  const db = await getDb();
+  if (!db) return null;
+
+  const existing = await db.select().from(visits).where(eq(visits.id, visitId)).limit(1);
+  if (existing.length === 0) return null;
+
+  const visit = existing[0];
+  const customerList = await db.select().from(customers).where(eq(customers.id, visit.customerId)).limit(1);
+  const evidenceList = await db.select().from(visitEvidence).where(eq(visitEvidence.visitId, visitId));
+
+  return {
+    visit,
+    customer: customerList[0],
+    evidence: evidenceList,
+  };
+}
+
+/**
+ * Chat Messaging System
+ */
+export async function getOrCreateDirectChannel(
+  actorUser: User,
+  targetUserId: number
+): Promise<DbChatChannel> {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable.");
+
+  // Check if channel exists in either order
+  const existing = await db
+    .select()
+    .from(chatChannels)
+    .where(
+      or(
+        and(eq(chatChannels.managerUserId, actorUser.id), eq(chatChannels.employeeUserId, targetUserId)),
+        and(eq(chatChannels.managerUserId, targetUserId), eq(chatChannels.employeeUserId, actorUser.id))
+      )
+    )
+    .limit(1);
+
+  if (existing.length > 0) {
+    return existing[0];
+  }
+
+  const channelId = `chan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  await db.insert(chatChannels).values({
+    id: channelId,
+    type: "direct",
+    managerUserId: actorUser.role === "manager" || actorUser.role === "admin" ? actorUser.id : targetUserId,
+    employeeUserId: actorUser.role === "employee" ? actorUser.id : targetUserId,
+  });
+
+  const created = await db.select().from(chatChannels).where(eq(chatChannels.id, channelId)).limit(1);
+  return created[0];
+}
+
+export async function sendChatMessage(
+  actorUser: User,
+  channelId: string,
+  message: string
+): Promise<DbChatMessage> {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable.");
+
+  const msgId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  await db.insert(chatMessages).values({
+    id: msgId,
+    channelId,
+    senderUserId: actorUser.id,
+    message: message.trim(),
+    status: "sent",
+  });
+
+  const created = await db.select().from(chatMessages).where(eq(chatMessages.id, msgId)).limit(1);
+  return created[0];
+}
+
+export async function getChannelMessages(
+  actorUser: User,
+  channelId: string,
+  limitCount = 50
+): Promise<DbChatMessage[]> {
+  const db = await getDb();
+  if (!db) return [];
+
+  return await db
+    .select()
+    .from(chatMessages)
+    .where(eq(chatMessages.channelId, channelId))
+    .orderBy(desc(chatMessages.createdAt))
+    .limit(limitCount);
+}
+
+/**
+ * Field Expenses System
+ */
+export async function createExpense(
+  actorUser: User,
+  input: {
+    amount: number;
+    category: string;
+    description?: string;
+    receiptUrl?: string;
+    expenseDate: string;
+  }
+): Promise<DbExpense> {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable.");
+
+  const expenseId = `exp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  await db.insert(expenses).values({
+    id: expenseId,
+    employeeUserId: actorUser.id,
+    amount: input.amount,
+    category: input.category,
+    description: input.description,
+    receiptUrl: input.receiptUrl,
+    expenseDate: input.expenseDate,
+    status: "SUBMITTED",
+  });
+
+  const created = await db.select().from(expenses).where(eq(expenses.id, expenseId)).limit(1);
+  return created[0];
+}
+
+export async function listExpenses(
+  actorUser: User
+): Promise<Array<DbExpense & { employeeName?: string }>> {
+  const db = await getDb();
+  if (!db) return [];
+
+  let rawList: DbExpense[];
+  if (actorUser.role === "admin") {
+    rawList = await db.select().from(expenses).orderBy(desc(expenses.createdAt));
+  } else if (actorUser.role === "manager") {
+    const team = await getUsersByManagerId(actorUser.id);
+    const teamIds = [actorUser.id, ...team.map((t) => t.id)];
+    const all = await db.select().from(expenses).orderBy(desc(expenses.createdAt));
+    rawList = all.filter((e) => teamIds.includes(e.employeeUserId));
+  } else {
+    rawList = await db
+      .select()
+      .from(expenses)
+      .where(eq(expenses.employeeUserId, actorUser.id))
+      .orderBy(desc(expenses.createdAt));
+  }
+
+  const allUsers = await getAllUsers();
+  const userMap = new Map<number, string>();
+  allUsers.forEach((u) => userMap.set(u.id, u.name || `Employee #${u.id}`));
+
+  return rawList.map((e) => ({
+    ...e,
+    employeeName: userMap.get(e.employeeUserId) || "Employee",
+  }));
+}
+
+export async function reviewExpense(
+  actorUser: User,
+  expenseId: string,
+  decision: "APPROVED" | "REJECTED"
+): Promise<DbExpense> {
+  if (actorUser.role !== "admin" && actorUser.role !== "manager") {
+    throw new Error("Forbidden: Only Administrators and Managers can approve or reject expenses.");
+  }
+
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable.");
+
+  await db
+    .update(expenses)
+    .set({
+      status: decision,
+      approvedByUserId: actorUser.id,
+    })
+    .where(eq(expenses.id, expenseId));
+
+  const updated = await db.select().from(expenses).where(eq(expenses.id, expenseId)).limit(1);
+  return updated[0];
+}
+
+/**
+ * Notifications & Device Tokens
+ */
+export async function registerDeviceSession(
+  userId: number,
+  input: {
+    expoPushToken?: string;
+    deviceModel?: string;
+    osVersion?: string;
+    appVersion?: string;
+  }
+): Promise<DbDeviceSession> {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable.");
+
+  const sessionId = `dev-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  await db.insert(deviceSessions).values({
+    id: sessionId,
+    userId,
+    expoPushToken: input.expoPushToken,
+    deviceModel: input.deviceModel,
+    osVersion: input.osVersion,
+    appVersion: input.appVersion,
+  });
+
+  const created = await db.select().from(deviceSessions).where(eq(deviceSessions.id, sessionId)).limit(1);
+  return created[0];
+}
+
+export async function createNotification(
+  recipientUserId: number,
+  input: {
+    title: string;
+    body: string;
+    type?: string;
+    dataJson?: string;
+  }
+): Promise<DbNotification> {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable.");
+
+  const notifId = `notif-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  await db.insert(notifications).values({
+    id: notifId,
+    recipientUserId,
+    title: input.title,
+    body: input.body,
+    type: input.type || "general",
+    dataJson: input.dataJson,
+  });
+
+  const created = await db.select().from(notifications).where(eq(notifications.id, notifId)).limit(1);
+  return created[0];
+}
+
+export async function getUserNotifications(userId: number): Promise<DbNotification[]> {
+  const db = await getDb();
+  if (!db) return [];
+
+  return await db
+    .select()
+    .from(notifications)
+    .where(eq(notifications.recipientUserId, userId))
+    .orderBy(desc(notifications.createdAt))
+    .limit(50);
+}
+
+/**
  * Get audit logs for sensitive operations.
  */
 export async function getAuditLogs(actorUser: User): Promise<any[]> {
@@ -897,4 +1688,5 @@ export async function getAuditLogs(actorUser: User): Promise<any[]> {
 
   return await db.select().from(auditEvents).orderBy(desc(auditEvents.occurredAt)).limit(100);
 }
+
 
