@@ -2,7 +2,6 @@ export type FieldRole = "employee" | "manager" | "admin";
 
 export type FieldSession = {
   id: string;
-  numericId?: number;
   identifier: string;
   displayName: string;
   role: FieldRole;
@@ -10,12 +9,10 @@ export type FieldSession = {
   signedInAt: string;
   dailyWage?: number;
   managerId?: string;
-  accountStatus?: string;
 };
 
 export type ManagedUser = {
   id: string;
-  numericId?: number;
   accountLinkId: string;
   displayName: string;
   identifier: string;

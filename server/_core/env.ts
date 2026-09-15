@@ -2,18 +2,11 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const isProduction = process.env.NODE_ENV === "production";
-if (isProduction) {
-  if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
-    throw new Error(
-      "[Security] FATAL: JWT_SECRET environment variable must be configured and at least 32 characters long in production.",
-    );
-  }
-}
+const cookieSecret = process.env.JWT_SECRET || (isProduction ? "" : "sologix-development-jwt-secret-key-32-chars-long");
 
-// Dev fallback is kept ONLY when NODE_ENV !== "production"
-const cookieSecret =
-  process.env.JWT_SECRET ||
-  (isProduction ? "" : "sologix-development-jwt-secret-key-32-chars-long");
+if (isProduction && !process.env.JWT_SECRET) {
+  console.error("[Security] FATAL: JWT_SECRET must be configured in production environment!");
+}
 
 export const ENV = {
   appId: process.env.VITE_APP_ID ?? "",
@@ -21,9 +14,7 @@ export const ENV = {
   databaseUrl: process.env.DATABASE_URL ?? "",
   oAuthServerUrl: process.env.OAUTH_SERVER_URL ?? "",
   ownerOpenId: process.env.OWNER_OPEN_ID ?? "",
-  get isProduction() {
-    return process.env.NODE_ENV === "production";
-  },
+  isProduction,
   forgeApiUrl: process.env.BUILT_IN_FORGE_API_URL ?? "",
   forgeApiKey: process.env.BUILT_IN_FORGE_API_KEY ?? "",
   firebaseServiceAccount: process.env.FIREBASE_SERVICE_ACCOUNT ?? "",

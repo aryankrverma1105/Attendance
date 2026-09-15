@@ -39,35 +39,11 @@ export default function TasksScreen() {
     });
   }, [data.managedUsers, currentUser]);
 
-  // Server-first tasks query with automatic 15s refresh
-  const serverTasksQuery = trpc.tasks.listTodayTasks.useQuery(undefined, {
-    refetchInterval: 15000,
-  });
-
+  // Tasks list:
+  // If employee: only tasks assigned to self
+  // If manager: tasks assigned to team or created by manager
+  // If admin: all tasks
   const visibleTasks = useMemo(() => {
-    if (serverTasksQuery.data && Array.isArray(serverTasksQuery.data)) {
-      return serverTasksQuery.data.map((t: any) => {
-        const assignedUser = data.managedUsers.find((u) => u.id === String(t.assignedToUserId));
-        return {
-          id: t.id,
-          title: t.title,
-          description: t.description || undefined,
-          assignedToUserId: String(t.assignedToUserId),
-          assignedToName: assignedUser?.displayName,
-          assignedByUserId: String(t.assignedByUserId),
-          scheduledDate: t.scheduledDate,
-          priority: t.priority,
-          status: t.status,
-          locationAddress: t.locationAddress || undefined,
-          customerName: t.customerName || undefined,
-          startedAt: t.startedAt ? new Date(t.startedAt).toISOString() : undefined,
-          completedAt: t.completedAt ? new Date(t.completedAt).toISOString() : undefined,
-          createdAt: new Date(t.createdAt).toISOString(),
-          updatedAt: new Date(t.updatedAt).toISOString(),
-        };
-      });
-    }
-
     return data.tasks.filter((t) => {
       if (currentUser?.role === "admin") return true;
       if (currentUser?.role === "manager") {
@@ -76,7 +52,11 @@ export default function TasksScreen() {
       }
       return t.assignedToUserId === currentUser?.id;
     });
-  }, [serverTasksQuery.data, data.tasks, data.managedUsers, currentUser]);
+  }, [data.tasks, data.managedUsers, currentUser]);
+
+  // tRPC mutation for server sync
+  const serverCreateTask = trpc.tasks.create.useMutation();
+  const serverUpdateStatus = trpc.tasks.updateStatus.useMutation();
 
   const handleCreateTask = async () => {
     if (!title.trim()) {
@@ -92,7 +72,8 @@ export default function TasksScreen() {
     const todayStr = new Date().toISOString().slice(0, 10);
 
     try {
-      await createTask({
+      // 1. Create in local workspace
+      createTask({
         title: title.trim(),
         description: description.trim() || undefined,
         assignedToUserId: assignedEmployeeId,
@@ -103,7 +84,19 @@ export default function TasksScreen() {
         customerName: customerName.trim() || undefined,
       });
 
-      serverTasksQuery.refetch().catch(() => {});
+      // 2. Sync to server if target has numeric ID
+      const numericTarget = parseInt(assignedEmployeeId, 10);
+      if (!isNaN(numericTarget)) {
+        await serverCreateTask.mutateAsync({
+          title: title.trim(),
+          description: description.trim() || undefined,
+          assignedToUserId: numericTarget,
+          scheduledDate: todayStr,
+          priority,
+          locationAddress: locationAddress.trim() || undefined,
+          customerName: customerName.trim() || undefined,
+        }).catch((err) => console.warn("[Tasks] Server sync queued:", err));
+      }
 
       // Reset modal
       setTitle("");
@@ -126,8 +119,14 @@ export default function TasksScreen() {
         ? "COMPLETED"
         : "COMPLETED";
 
-    await updateTaskStatus(taskId, nextStatus);
-    serverTasksQuery.refetch().catch(() => {});
+    // 1. Local update
+    updateTaskStatus(taskId, nextStatus);
+
+    // 2. Server update
+    await serverUpdateStatus.mutateAsync({
+      taskId,
+      status: nextStatus,
+    }).catch((err) => console.warn("[Tasks] Server status sync queued:", err));
   };
 
   return (

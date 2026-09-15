@@ -6,8 +6,8 @@ import {
   removeOperation,
   flushOfflineQueue,
   getExponentialBackoffMs,
+  type QueuedOperation,
 } from "../lib/offline-sync";
-import type { QueuedOperation } from "../lib/offline-sync";
 
 // Mock AsyncStorage in-memory
 const storage = new Map<string, string>();

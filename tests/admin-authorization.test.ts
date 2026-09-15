@@ -36,7 +36,6 @@ describe("Admin Authorization & Operational Constraint Security", () => {
     createdAt: new Date(),
     updatedAt: new Date(),
     lastSignedIn: new Date(),
-    sessionVersion: 1,
   };
 
   it("ALLOWS Admin to read organization reports", async () => {
@@ -62,7 +61,6 @@ describe("Admin Authorization & Operational Constraint Security", () => {
 
     await expect(
       caller.attendance.checkIn({
-        checkInPhotoUri: "selfie-mock.jpg",
         checkInLat: "23.3441",
         checkInLng: "85.3096",
       })

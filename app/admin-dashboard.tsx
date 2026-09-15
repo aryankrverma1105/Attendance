@@ -57,51 +57,12 @@ export default function AdminDashboardScreen() {
   const currentMonth = now.getMonth() + 1;
   const currentYear = now.getFullYear();
 
-  const adminOverviewQuery = trpc.workforce.getAdminOverview.useQuery(undefined, {
-    enabled: Boolean(hasAccess && isAdmin),
-    refetchInterval: 15000,
-  });
-
-  const managerOverviewQuery = trpc.workforce.getManagerOverview.useQuery(undefined, {
-    enabled: Boolean(hasAccess && isManager),
-    refetchInterval: 15000,
-  });
+  const createUserMutation = trpc.workforce.createUser.useMutation();
 
   // Filter users by scope:
-  // Server-first overview if available, otherwise local state.
-  const scopedUsers = useMemo((): (ManagedUser & { workedDaysThisMonth?: number; earningsThisMonth?: number })[] => {
-    if (isAdmin && adminOverviewQuery.data?.users) {
-      return adminOverviewQuery.data.users.map((u) => ({
-        id: String(u.id),
-        numericId: u.id,
-        accountLinkId: String(u.id),
-        displayName: u.name || u.phoneE164 || `User #${u.id}`,
-        identifier: u.phoneE164 || u.email || `User #${u.id}`,
-        role: u.role as FieldRole,
-        status: (u.accountStatus === "active" ? "active" : u.accountStatus === "invited" ? "invited" : "suspended") as "active" | "invited" | "suspended",
-        dailyWage: u.dailyWage ?? 0,
-        managerId: u.managerId ? String(u.managerId) : undefined,
-        createdAt: new Date().toISOString(),
-        workedDaysThisMonth: u.workedDaysThisMonth,
-        earningsThisMonth: u.earningsThisMonth,
-      }));
-    }
-    if (isManager && managerOverviewQuery.data?.teamMembers) {
-      return managerOverviewQuery.data.teamMembers.map((u) => ({
-        id: String(u.id),
-        numericId: u.id,
-        accountLinkId: String(u.id),
-        displayName: u.name || u.phoneE164 || "Team Member",
-        identifier: u.phoneE164 || `User #${u.id}`,
-        role: u.role as FieldRole,
-        status: (u.accountStatus === "active" ? "active" : u.accountStatus === "invited" ? "invited" : "suspended") as "active" | "invited" | "suspended",
-        dailyWage: u.dailyWage ?? 0,
-        createdAt: new Date().toISOString(),
-        workedDaysThisMonth: u.workedDaysThisMonth,
-        earningsThisMonth: u.earningsThisMonth,
-      }));
-    }
-
+  // Admin sees all users.
+  // Manager sees team members (matching managerId or assigned scope).
+  const scopedUsers = useMemo(() => {
     if (isAdmin) return data.managedUsers;
     if (isManager) {
       return data.managedUsers.filter(
@@ -109,7 +70,7 @@ export default function AdminDashboardScreen() {
       );
     }
     return [];
-  }, [isAdmin, isManager, adminOverviewQuery.data, managerOverviewQuery.data, data.managedUsers, actorId]);
+  }, [data.managedUsers, isAdmin, isManager, actorId]);
 
   const visibleUsers = useMemo(() => {
     return scopedUsers.filter((user) => {
@@ -123,31 +84,11 @@ export default function AdminDashboardScreen() {
     });
   }, [scopedUsers, query, roleFilter]);
 
-  const activeUsers = useMemo(() => {
-    if (isAdmin && adminOverviewQuery.data?.activeEmployees !== undefined) {
-      return adminOverviewQuery.data.activeEmployees;
-    }
-    return scopedUsers.filter((user) => user.status === "active").length;
-  }, [isAdmin, adminOverviewQuery.data, scopedUsers]);
-
-  const totalUsersCount = useMemo(() => {
-    if (isAdmin && adminOverviewQuery.data?.totalEmployees !== undefined) {
-      return adminOverviewQuery.data.totalEmployees;
-    }
-    if (isManager && managerOverviewQuery.data?.teamSize !== undefined) {
-      return managerOverviewQuery.data.teamSize;
-    }
-    return scopedUsers.length;
-  }, [isAdmin, isManager, adminOverviewQuery.data, managerOverviewQuery.data, scopedUsers.length]);
+  const activeUsers = scopedUsers.filter((user) => user.status === "active").length;
+  const managersCount = scopedUsers.filter((user) => user.role === "manager").length;
 
   // Calculate total monthly estimated wages strictly for employees (Admin/Manager are salaried)
   const totalEstimatedPayroll = useMemo(() => {
-    if (isAdmin && adminOverviewQuery.data?.totalMonthlyPayroll !== undefined) {
-      return adminOverviewQuery.data.totalMonthlyPayroll;
-    }
-    if (isManager && managerOverviewQuery.data?.teamMonthlyPayroll !== undefined) {
-      return managerOverviewQuery.data.teamMonthlyPayroll;
-    }
     return scopedUsers.reduce((total, user) => {
       if (user.role !== "employee") return total;
       const userAttendance = data.attendance.filter(
@@ -157,7 +98,7 @@ export default function AdminDashboardScreen() {
       const userEarnings = calculateEarnings(workedDays, user.dailyWage || 0);
       return total + userEarnings;
     }, 0);
-  }, [isAdmin, isManager, adminOverviewQuery.data, managerOverviewQuery.data, scopedUsers, data.attendance, currentMonth, currentYear, actorId]);
+  }, [scopedUsers, data.attendance, currentMonth, currentYear, actorId]);
 
   const createAccount = async () => {
     if (!name.trim() || !identifier.trim()) {
@@ -178,8 +119,8 @@ export default function AdminDashboardScreen() {
     const parsedWage = initialWage.trim() ? Number(initialWage.trim()) : 0;
     const validatedWage = role === "employee" ? (isNaN(parsedWage) || parsedWage < 0 ? 0 : Math.round(parsedWage)) : 0;
 
-    // Local state update + server mutation via createManagedUser
-    await createManagedUser({
+    // 1. Local state update
+    createManagedUser({
       displayName: name.trim(),
       identifier: cleanPhone,
       role,
@@ -188,8 +129,18 @@ export default function AdminDashboardScreen() {
       managerId: role === "employee" && isManager ? actorId : undefined,
     });
 
-    adminOverviewQuery.refetch();
-    managerOverviewQuery.refetch();
+    // 2. Server mutation if Admin
+    if (isAdmin) {
+      await createUserMutation.mutateAsync({
+        name: name.trim(),
+        phoneE164: cleanPhone,
+        role,
+        department: department.trim() || undefined,
+        dailyWage: validatedWage,
+      }).catch((err: unknown) => {
+        console.warn("[Admin] Server user creation sync queued:", err);
+      });
+    }
 
     setName("");
     setIdentifier("");
@@ -199,7 +150,7 @@ export default function AdminDashboardScreen() {
     setShowCreate(false);
     Alert.alert(
       "Account invitation created",
-      "The account invitation and configured daily wage have been safely saved."
+      "The account invitation and configured daily wage have been safely queued."
     );
   };
 
@@ -269,7 +220,7 @@ export default function AdminDashboardScreen() {
           <MetricCard
             icon="groups"
             label={isAdmin ? "Active Users" : "Team Members"}
-            subtitle={`${activeUsers} active / ${totalUsersCount} total`}
+            subtitle={`${activeUsers} active / ${scopedUsers.length} total`}
             tone="navy"
             value={String(activeUsers)}
           />
@@ -390,21 +341,15 @@ export default function AdminDashboardScreen() {
         {visibleUsers.length > 0 ? (
           <View style={styles.directory}>
             {visibleUsers.map((emp) => {
-              let empWorkedDays = emp.workedDaysThisMonth;
-              let empEarnings = emp.earningsThisMonth;
-
-              if (empWorkedDays === undefined || empEarnings === undefined) {
-                const empAttendance = data.attendance.filter(
-                  (rec) => rec.employeeId === emp.id || (!rec.employeeId && emp.id === actorId)
-                );
-                const { workedDays } = calculateWorkedDays(
-                  empAttendance,
-                  currentMonth,
-                  currentYear
-                );
-                empWorkedDays = workedDays;
-                empEarnings = calculateEarnings(workedDays, emp.dailyWage || 0);
-              }
+              const empAttendance = data.attendance.filter(
+                (rec) => rec.employeeId === emp.id || (!rec.employeeId && emp.id === actorId)
+              );
+              const { workedDays: empWorkedDays } = calculateWorkedDays(
+                empAttendance,
+                currentMonth,
+                currentYear
+              );
+              const empEarnings = calculateEarnings(empWorkedDays, emp.dailyWage || 0);
 
               const canEditThisWage = canSetEmployeeWage({
                 actorRole,
@@ -509,10 +454,8 @@ export default function AdminDashboardScreen() {
             currentWage={editingUser.dailyWage || 0}
             employeeName={editingUser.displayName}
             onClose={() => setEditingUser(null)}
-            onSave={async (newWage) => {
-              await updateEmployeeWage(editingUser.id, newWage);
-              adminOverviewQuery.refetch();
-              managerOverviewQuery.refetch();
+            onSave={(newWage) => {
+              updateEmployeeWage(editingUser.id, newWage);
               setEditingUser(null);
             }}
             visible={Boolean(editingUser)}

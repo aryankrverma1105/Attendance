@@ -6,6 +6,7 @@ import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { registerOAuthRoutes } from "./oauth";
 import { registerStorageProxy } from "./storageProxy";
 import { initSelfieStorage } from "../selfie-storage";
+import { initUserSync } from "../user-sync";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
 
@@ -30,7 +31,6 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
 
 async function startServer() {
   const app = express();
-  app.set("trust proxy", 1);
   const server = createServer(app);
 
   // Security headers
@@ -44,34 +44,28 @@ async function startServer() {
     next();
   });
 
-  // CORS configuration with strict allowlist
+  // CORS configuration with production allowlist support
   app.use((req, res, next) => {
     const origin = req.headers.origin;
-    const allowedOriginsEnv = process.env.ALLOWED_ORIGINS
-      ? process.env.ALLOWED_ORIGINS.split(",").map((s) => s.trim().toLowerCase())
+    const allowedOrigins = process.env.ALLOWED_ORIGINS
+      ? process.env.ALLOWED_ORIGINS.split(",").map((s) => s.trim())
       : null;
 
-    let isAllowed = false;
     if (origin) {
-      const lowerOrigin = origin.toLowerCase();
-      if (allowedOriginsEnv && allowedOriginsEnv.length > 0) {
-        isAllowed = allowedOriginsEnv.includes(lowerOrigin);
-      } else if (process.env.NODE_ENV !== "production") {
-        // Dev fallback: allow localhost and 127.0.0.1 on any port
-        isAllowed = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
-      }
-
-      if (isAllowed) {
+      if (allowedOrigins) {
+        if (allowedOrigins.includes(origin)) {
+          res.header("Access-Control-Allow-Origin", origin);
+        }
+      } else {
         res.header("Access-Control-Allow-Origin", origin);
-        res.header("Access-Control-Allow-Credentials", "true");
       }
     }
-
     res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
     res.header(
       "Access-Control-Allow-Headers",
       "Origin, X-Requested-With, Content-Type, Accept, Authorization",
     );
+    res.header("Access-Control-Allow-Credentials", "true");
 
     // Handle preflight requests
     if (req.method === "OPTIONS") {
@@ -87,6 +81,7 @@ async function startServer() {
   registerStorageProxy(app);
   registerOAuthRoutes(app);
   initSelfieStorage(app);
+  initUserSync(app);
 
   app.get("/api/health", (_req, res) => {
     res.json({ ok: true, status: "healthy", timestamp: Date.now() });

@@ -51,37 +51,8 @@ export default function TasksTabScreen() {
   // If employee: only tasks assigned to self
   // If manager: tasks assigned to team or created by manager
   // If admin: all tasks
-  // Server-first tasks query with automatic 15s polling
-  const serverTasksQuery = trpc.tasks.listTodayTasks.useQuery(undefined, {
-    refetchInterval: 15000,
-  });
-
   const visibleTasks = useMemo(() => {
-    let baseList = data.tasks;
-    if (serverTasksQuery.data && Array.isArray(serverTasksQuery.data)) {
-      baseList = serverTasksQuery.data.map((t: any) => {
-        const assignedUser = data.managedUsers.find((u) => u.id === String(t.assignedToUserId));
-        return {
-          id: t.id,
-          title: t.title,
-          description: t.description || undefined,
-          assignedToUserId: String(t.assignedToUserId),
-          assignedToName: assignedUser?.displayName,
-          assignedByUserId: String(t.assignedByUserId),
-          scheduledDate: t.scheduledDate,
-          priority: t.priority,
-          status: t.status,
-          locationAddress: t.locationAddress || undefined,
-          customerName: t.customerName || undefined,
-          startedAt: t.startedAt ? new Date(t.startedAt).toISOString() : undefined,
-          completedAt: t.completedAt ? new Date(t.completedAt).toISOString() : undefined,
-          createdAt: new Date(t.createdAt).toISOString(),
-          updatedAt: new Date(t.updatedAt).toISOString(),
-        };
-      });
-    }
-
-    return baseList.filter((t) => {
+    return data.tasks.filter((t) => {
       const matchesStatus = statusFilter === "ALL" || t.status === statusFilter;
       const matchesPriority = priorityFilter === "ALL" || t.priority === priorityFilter;
       if (!matchesStatus || !matchesPriority) return false;
@@ -93,7 +64,7 @@ export default function TasksTabScreen() {
       }
       return t.assignedToUserId === currentUser?.id;
     });
-  }, [serverTasksQuery.data, data.tasks, data.managedUsers, currentUser, statusFilter, priorityFilter]);
+  }, [data.tasks, data.managedUsers, currentUser, statusFilter, priorityFilter]);
 
   // tRPC mutation for server sync
   const serverCreateTask = trpc.tasks.create.useMutation();
@@ -123,7 +94,7 @@ export default function TasksTabScreen() {
     const todayStr = new Date().toISOString().slice(0, 10);
 
     try {
-      await createTask({
+      createTask({
         title: title.trim(),
         description: description.trim() || undefined,
         assignedToUserId: assignedEmployeeId,
@@ -134,7 +105,18 @@ export default function TasksTabScreen() {
         customerName: customerName.trim() || undefined,
       });
 
-      serverTasksQuery.refetch().catch(() => {});
+      const numericTarget = parseInt(assignedEmployeeId, 10);
+      if (!isNaN(numericTarget)) {
+        await serverCreateTask.mutateAsync({
+          title: title.trim(),
+          description: description.trim() || undefined,
+          assignedToUserId: numericTarget,
+          scheduledDate: todayStr,
+          priority,
+          locationAddress: locationAddress.trim() || undefined,
+          customerName: customerName.trim() || undefined,
+        }).catch((err: unknown) => console.warn("[Tasks] Server sync queued:", err));
+      }
 
       setTitle("");
       setDescription("");
@@ -152,16 +134,13 @@ export default function TasksTabScreen() {
     }
   };
 
-  const handleStatusTransition = async (taskId: string, currentStatus: TaskStatus) => {
-    const nextStatus: TaskStatus =
-      currentStatus === "PENDING"
-        ? "IN_PROGRESS"
-        : currentStatus === "IN_PROGRESS"
-        ? "COMPLETED"
-        : "COMPLETED";
+  const handleStatusTransition = async (taskId: string, nextStatus: TaskStatus) => {
+    updateTaskStatus(taskId, nextStatus);
 
-    await updateTaskStatus(taskId, nextStatus);
-    serverTasksQuery.refetch().catch(() => {});
+    await serverUpdateStatus.mutateAsync({
+      taskId: taskId,
+      status: nextStatus,
+    }).catch((err: unknown) => console.warn("[Tasks] Status update sync queued:", err));
   };
 
   const openNavigation = (lat?: string, lng?: string, address?: string) => {

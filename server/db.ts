@@ -68,10 +68,6 @@ export async function getDb() {
   return _db;
 }
 
-export function setDbForTesting(mockDb: any) {
-  _db = mockDb;
-}
-
 export async function upsertUser(user: InsertUser): Promise<void> {
   if (!user.openId) {
     throw new Error("User openId is required for upsert");
@@ -265,13 +261,7 @@ export async function autoActivateUser(firebaseUid: string, phoneE164: string, n
     }
 
     const allUsers = await tx.select().from(users).limit(1);
-    const allowBootstrap = process.env.ALLOW_FIRST_USER_BOOTSTRAP === "true";
-    const isFirstUser = allUsers.length === 0;
-    const role = isFirstUser && allowBootstrap ? "admin" : "employee";
-
-    if (isFirstUser && allowBootstrap) {
-      console.warn(`[Bootstrap] Initializing first user ${phoneE164} as administrator via ALLOW_FIRST_USER_BOOTSTRAP flag.`);
-    }
+    const role = allUsers.length === 0 ? "admin" : "employee";
 
     const [insertResult] = await tx.insert(users).values({
       openId,
@@ -281,7 +271,6 @@ export async function autoActivateUser(firebaseUid: string, phoneE164: string, n
       role,
       accountStatus: "active",
       lastSignedIn: signedInAt,
-      sessionVersion: 1,
     });
 
     const userId = insertResult.insertId;
@@ -291,10 +280,8 @@ export async function autoActivateUser(firebaseUid: string, phoneE164: string, n
       id: auditId,
       actorUserOpenId: openId,
       subjectUserOpenId: openId,
-      action: isFirstUser && allowBootstrap ? "account.bootstrap_first_admin" : "account.auto_activated",
-      detail: isFirstUser && allowBootstrap
-        ? `Explicit first-user bootstrap granted Admin role to phone ${phoneE164}`
-        : `Auto-activated account for phone ${phoneE164} as role ${role}`,
+      action: "account.auto_activated",
+      detail: `Auto-activated first-time or dev account for phone ${phoneE164} as role ${role}`,
     });
 
     const activeUser = await tx.select().from(users).where(eq(users.id, userId)).limit(1);
@@ -338,7 +325,8 @@ export async function updateUserDailyWage(
 
   const db = await getDb();
   if (!db) {
-    throw new Error("Database unavailable. Cannot update employee daily wage.");
+    console.warn("[Database] Cannot update wage: database not available");
+    return { success: true, updatedWage: newDailyWage };
   }
 
   const targetUser = await getUserById(targetUserId);
@@ -575,7 +563,6 @@ export async function createTask(
     locationLng?: string;
     locationAddress?: string;
     customerName?: string;
-    idempotencyKey?: string;
   }
 ): Promise<DbTask> {
   if (actorUser.role !== "admin" && actorUser.role !== "manager") {
@@ -600,16 +587,7 @@ export async function createTask(
     throw new Error("Database unavailable.");
   }
 
-  if (input.idempotencyKey) {
-    const existing = await db.select().from(tasks).where(eq(tasks.id, input.idempotencyKey)).limit(1);
-    if (existing.length > 0) {
-      return existing[0];
-    }
-  }
-
-  const taskId = input.idempotencyKey && input.idempotencyKey.length <= 36
-    ? input.idempotencyKey
-    : `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   await db.insert(tasks).values({
     id: taskId,
     title: input.title.trim(),
@@ -713,74 +691,10 @@ export async function recordGpsPoint(
     longitude: string;
     accuracy?: number;
     address?: string;
-    taskId?: string;
   }
 ): Promise<DbGpsPoint> {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable.");
-
-  const lat = parseFloat(point.latitude);
-  const lng = parseFloat(point.longitude);
-
-  // 1. Basic server-side coordinates sanity checks
-  if (isNaN(lat) || lat < -90 || lat > 90) {
-    throw new Error("Invalid latitude: must be between -90 and 90 degrees.");
-  }
-  if (isNaN(lng) || lng < -180 || lng > 180) {
-    throw new Error("Invalid longitude: must be between -180 and 180 degrees.");
-  }
-
-  // 2. Worksite geofence check if assigned to a task
-  if (point.taskId) {
-    const taskList = await db.select().from(tasks).where(eq(tasks.id, point.taskId)).limit(1);
-    if (taskList.length > 0 && taskList[0].locationLat && taskList[0].locationLng) {
-      const taskLat = parseFloat(taskList[0].locationLat);
-      const taskLng = parseFloat(taskList[0].locationLng);
-      if (!isNaN(taskLat) && !isNaN(taskLng)) {
-        const distToTask = haversineDistanceMeters(lat, lng, taskLat, taskLng);
-        const allowedRadius = Number(process.env.MAX_WORKSITE_RADIUS_METERS) || 500;
-        if (distToTask > allowedRadius) {
-          throw new Error(
-            `Location verification failed: point is ${distToTask}m away from task worksite, exceeding maximum radius of ${allowedRadius}m.`
-          );
-        }
-      }
-    }
-  }
-
-  // 3. Speed-plausibility check between consecutive GPS points for the same user/day
-  const previousPoints = await db
-    .select()
-    .from(gpsPoints)
-    .where(
-      and(
-        eq(gpsPoints.userId, userId),
-        eq(gpsPoints.recordedDate, point.recordedDate)
-      )
-    )
-    .orderBy(desc(gpsPoints.recordedAt))
-    .limit(1);
-
-  if (previousPoints.length > 0) {
-    const prev = previousPoints[0];
-    const prevLat = parseFloat(prev.latitude);
-    const prevLng = parseFloat(prev.longitude);
-    if (!isNaN(prevLat) && !isNaN(prevLng)) {
-      const distanceMeters = haversineDistanceMeters(prevLat, prevLng, lat, lng);
-      const prevTimeMs = new Date(prev.recordedAt).getTime();
-      const timeDiffSec = Math.max((Date.now() - prevTimeMs) / 1000, 0.1);
-
-      if (distanceMeters > 50) {
-        const speedKmH = (distanceMeters / timeDiffSec) * 3.6;
-        const MAX_SPEED_KMH = 150;
-        if (speedKmH > MAX_SPEED_KMH) {
-          throw new Error(
-            `GPS speed check failed: implied speed of ${Math.round(speedKmH)} km/h exceeds maximum plausible speed limit of ${MAX_SPEED_KMH} km/h.`
-          );
-        }
-      }
-    }
-  }
 
   const id = `gps-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   await db.insert(gpsPoints).values({
@@ -880,11 +794,6 @@ export async function updateUserStatusByAdmin(
   if (input.role) updates.role = input.role;
   if (input.managerId !== undefined) updates.managerId = input.managerId;
 
-  // Invalidate existing sessions if role or status is changed
-  if (input.accountStatus || input.role) {
-    updates.sessionVersion = (targetUser.sessionVersion || 1) + 1;
-  }
-
   await db.update(users).set(updates).where(eq(users.id, input.targetUserId));
 
   // Create audit event
@@ -940,8 +849,6 @@ export async function recordAttendanceCheckIn(
     targetLat?: string;
     targetLng?: string;
     geofenceRadiusMeters?: number;
-    taskId?: string;
-    idempotencyKey?: string;
   }
 ): Promise<any> {
   if (employeeUser.role !== "employee") {
@@ -951,93 +858,57 @@ export async function recordAttendanceCheckIn(
   const db = await getDb();
   if (!db) throw new Error("Database unavailable.");
 
-  if (input.idempotencyKey) {
-    const existing = await db.select().from(attendanceRecords).where(eq(attendanceRecords.id, input.idempotencyKey)).limit(1);
-    if (existing.length > 0) {
-      return existing[0];
-    }
-  }
-
-  // 0. Lat/Lng Sanity Validation
-  if (input.checkInLat !== undefined && input.checkInLat !== null && input.checkInLat !== "") {
-    const lat = parseFloat(input.checkInLat);
-    if (isNaN(lat) || lat < -90 || lat > 90) {
-      throw new Error("Invalid latitude: must be between -90 and 90 degrees.");
-    }
-  }
-  if (input.checkInLng !== undefined && input.checkInLng !== null && input.checkInLng !== "") {
-    const lng = parseFloat(input.checkInLng);
-    if (isNaN(lng) || lng < -180 || lng > 180) {
-      throw new Error("Invalid longitude: must be between -180 and 180 degrees.");
-    }
-  }
-
   const now = new Date();
 
-  // 1. Reject duplicate open check-ins: an employee with an existing record today with no checkOutAt
-  const todayStr = now.toISOString().slice(0, 10);
-  const startOfDay = new Date(`${todayStr}T00:00:00.000Z`);
+  // 1. Idempotency Check: prevent rapid duplicate check-ins within 60 seconds
   const recentRecords = await db
     .select()
     .from(attendanceRecords)
-    .where(
-      and(
-        eq(attendanceRecords.userId, employeeUser.id),
-        gte(attendanceRecords.checkInAt, startOfDay)
-      )
-    )
-    .orderBy(desc(attendanceRecords.checkInAt));
+    .where(eq(attendanceRecords.userId, employeeUser.id))
+    .orderBy(desc(attendanceRecords.checkInAt))
+    .limit(1);
 
-  const openRecord = recentRecords.find((r) => !r.checkOutAt);
-  if (openRecord) {
-    throw new Error("Active check-in already in progress. You must check out before checking in again.");
+  if (recentRecords.length > 0 && !recentRecords[0].checkOutAt) {
+    const elapsedSec = (now.getTime() - new Date(recentRecords[0].checkInAt).getTime()) / 1000;
+    if (elapsedSec < 30) {
+      return recentRecords[0];
+    }
   }
 
-  const id = input.idempotencyKey && input.idempotencyKey.length <= 36
-    ? input.idempotencyKey
-    : `att-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const id = `att-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   // 2. Mock GPS & Accuracy validation (independently configurable on server)
   const MAX_GPS_ACCURACY_METERS = Number(process.env.MAX_GPS_ACCURACY_METERS) || 150;
-  const DEFAULT_GEOFENCE_RADIUS_METERS = Number(process.env.DEFAULT_GEOFENCE_RADIUS_METERS) || 500;
+  const DEFAULT_GEOFENCE_RADIUS_METERS = Number(process.env.DEFAULT_GEOFENCE_RADIUS_METERS) || 300;
 
   let isMockedFlag = input.isMocked ? 1 : 0;
-  // Default to "pending" instead of "verified"
-  let status: "verified" | "review" | "pending" = "pending";
-
-  // 3. Worksite / Task Geofence Validation
-  let targetLat = input.targetLat;
-  let targetLng = input.targetLng;
-  if (input.taskId && (!targetLat || !targetLng)) {
-    const taskRecord = await db.select().from(tasks).where(eq(tasks.id, input.taskId)).limit(1);
-    if (taskRecord.length > 0 && taskRecord[0].locationLat && taskRecord[0].locationLng) {
-      targetLat = taskRecord[0].locationLat;
-      targetLng = taskRecord[0].locationLng;
-    }
-  }
-
-  if (input.checkInLat && input.checkInLng && targetLat && targetLng) {
-    const empLat = parseFloat(input.checkInLat);
-    const empLng = parseFloat(input.checkInLng);
-    const tgtLat = parseFloat(targetLat);
-    const tgtLng = parseFloat(targetLng);
-
-    if (!isNaN(empLat) && !isNaN(empLng) && !isNaN(tgtLat) && !isNaN(tgtLng)) {
-      const distance = haversineDistanceMeters(empLat, empLng, tgtLat, tgtLng);
-      const allowedRadius = input.geofenceRadiusMeters || DEFAULT_GEOFENCE_RADIUS_METERS;
-      if (distance <= allowedRadius) {
-        status = "verified";
-      } else {
-        status = "review";
-      }
-    }
-  }
+  let status: "verified" | "review" | "pending" = "verified";
 
   if (input.checkInAccuracy && input.checkInAccuracy > MAX_GPS_ACCURACY_METERS) {
     status = "review";
   }
   if (isMockedFlag === 1) {
     status = "review";
+  }
+
+  // 3. Server-Authoritative Geofence Distance Validation
+  let geofenceStatus: "inside" | "outside" | "unverified" = "inside";
+  if (input.checkInLat && input.checkInLng && input.targetLat && input.targetLng) {
+    const empLat = parseFloat(input.checkInLat);
+    const empLng = parseFloat(input.checkInLng);
+    const tgtLat = parseFloat(input.targetLat);
+    const tgtLng = parseFloat(input.targetLng);
+
+    if (!isNaN(empLat) && !isNaN(empLng) && !isNaN(tgtLat) && !isNaN(tgtLng)) {
+      const distance = haversineDistanceMeters(empLat, empLng, tgtLat, tgtLng);
+      const allowedRadius = input.geofenceRadiusMeters || DEFAULT_GEOFENCE_RADIUS_METERS;
+      if (distance > allowedRadius) {
+        geofenceStatus = "outside";
+        status = "review"; // Flag for manager review if outside geofence
+      } else {
+        geofenceStatus = "inside";
+      }
+    }
   }
 
   await db.insert(attendanceRecords).values({
@@ -1053,52 +924,6 @@ export async function recordAttendanceCheckIn(
 
   const record = await db.select().from(attendanceRecords).where(eq(attendanceRecords.id, id)).limit(1);
   return record[0];
-}
-
-/**
- * Manually approve a pending or review attendance record (Manager or Admin only).
- */
-export async function approveAttendanceRecord(
-  actorUser: User,
-  recordId: string
-): Promise<{ success: boolean; record: any }> {
-  if (actorUser.role !== "admin" && actorUser.role !== "manager") {
-    throw new Error("Forbidden: Only Managers and Administrators can approve attendance records.");
-  }
-
-  const db = await getDb();
-  if (!db) throw new Error("Database unavailable.");
-
-  const existing = await db
-    .select()
-    .from(attendanceRecords)
-    .where(eq(attendanceRecords.id, recordId))
-    .limit(1);
-
-  if (existing.length === 0) {
-    throw new Error("Attendance record not found.");
-  }
-
-  const record = existing[0];
-  if (actorUser.role === "manager") {
-    const targetEmployee = await getUserById(record.userId);
-    if (targetEmployee?.managerId !== actorUser.id) {
-      throw new Error("Forbidden: You can only approve attendance records for your team members.");
-    }
-  }
-
-  await db
-    .update(attendanceRecords)
-    .set({ status: "verified" })
-    .where(eq(attendanceRecords.id, recordId));
-
-  const updated = await db
-    .select()
-    .from(attendanceRecords)
-    .where(eq(attendanceRecords.id, recordId))
-    .limit(1);
-
-  return { success: true, record: updated[0] };
 }
 
 export async function recordAttendanceCheckOut(

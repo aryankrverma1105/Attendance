@@ -71,17 +71,7 @@ export default function HomeScreen() {
   const isShiftComplete = Boolean(todayAttendance && todayAttendance.checkOutAt);
   const needsCheckout = Boolean(todayAttendance && !todayAttendance.checkOutAt);
 
-  // Server queries for real-time data
-  const employeeDashboardQuery = trpc.workforce.getEmployeeDashboard.useQuery(undefined, {
-    enabled: Boolean(isEmployee && user),
-    refetchInterval: 15000,
-  });
-
-  const todayTasksQuery = trpc.tasks.listTodayTasks.useQuery(undefined, {
-    refetchInterval: 15000,
-  });
-
-  // Employee-specific worked days and earnings calculation (local fallback)
+  // Employee-specific worked days and earnings calculation
   const employeeAttendance = useMemo(
     () =>
       data.attendance.filter(
@@ -90,26 +80,21 @@ export default function HomeScreen() {
     [data.attendance, user?.id]
   );
 
-  const { workedDays: localWorkedDays } = useMemo(
+  const { workedDays } = useMemo(
     () => calculateWorkedDays(employeeAttendance, currentMonth, currentYear),
     [employeeAttendance, currentMonth, currentYear]
   );
 
-  const localWorkingDaysInMonth = useMemo(
+  const workingDaysInMonth = useMemo(
     () => calculateWorkingDaysInMonth(currentYear, currentMonth),
     [currentYear, currentMonth]
   );
 
   const userDailyWage = isEmployee ? (user?.dailyWage ?? 0) : 0;
-  const localCalculatedEarnings = useMemo(
-    () => (isEmployee ? calculateEarnings(localWorkedDays, userDailyWage) : 0),
-    [isEmployee, localWorkedDays, userDailyWage]
+  const calculatedEarnings = useMemo(
+    () => (isEmployee ? calculateEarnings(workedDays, userDailyWage) : 0),
+    [isEmployee, workedDays, userDailyWage]
   );
-
-  // Authoritative server values when available, local fallback otherwise
-  const workedDays = employeeDashboardQuery.data?.workedDays ?? localWorkedDays;
-  const workingDaysInMonth = employeeDashboardQuery.data?.workingDaysInMonth ?? localWorkingDaysInMonth;
-  const calculatedEarnings = employeeDashboardQuery.data?.calculatedEarnings ?? localCalculatedEarnings;
 
   // Visits
   const todaysVisits = useMemo(
@@ -128,26 +113,8 @@ export default function HomeScreen() {
     return [];
   }, [data.managedUsers, isAdmin, isManager, user?.id]);
 
-  // Tasks: Today's Tasks (Server-first if available)
+  // Tasks: Today's Tasks
   const todaysTasks = useMemo(() => {
-    if (todayTasksQuery.data) {
-      return todayTasksQuery.data.map((t) => ({
-        id: String(t.id),
-        title: t.title,
-        customerName: t.customerName ?? undefined,
-        locationAddress: t.locationAddress ?? undefined,
-        locationLat: t.locationLat ? String(t.locationLat) : undefined,
-        locationLng: t.locationLng ? String(t.locationLng) : undefined,
-        assignedToUserId: String(t.assignedToUserId),
-        assignedToName: (t as any).assignedToName ?? undefined,
-        assignedByUserId: t.assignedByUserId ? String(t.assignedByUserId) : undefined,
-        scheduledDate: t.scheduledDate,
-        status: t.status as TaskStatus,
-        priority: (t.priority === "URGENT" || t.priority === "HIGH" ? "urgent" : "normal") as "normal" | "urgent",
-        createdAt: t.createdAt ? new Date(t.createdAt).toISOString() : new Date().toISOString(),
-      }));
-    }
-
     return data.tasks.filter((t) => {
       const isToday = t.scheduledDate === todayDateStr || t.scheduledDate === today;
       if (isEmployee) {
@@ -158,7 +125,7 @@ export default function HomeScreen() {
       }
       return isToday;
     });
-  }, [todayTasksQuery.data, data.tasks, data.managedUsers, isEmployee, isManager, user?.id, todayDateStr, today]);
+  }, [data.tasks, data.managedUsers, isEmployee, isManager, user?.id, todayDateStr, today]);
 
   const activeFieldWorkers = useMemo(() => {
     return data.managedUsers.filter((u) => {
@@ -179,9 +146,15 @@ export default function HomeScreen() {
     }, 0);
   }, [data.managedUsers, data.attendance, currentMonth, currentYear]);
 
+  // tRPC mutation for task status update
+  const serverUpdateStatus = trpc.tasks.updateStatus.useMutation();
+
   const handleStatusTransition = async (taskId: string, nextStatus: TaskStatus) => {
-    await updateTaskStatus(taskId, nextStatus);
-    todayTasksQuery.refetch();
+    updateTaskStatus(taskId, nextStatus);
+    await serverUpdateStatus.mutateAsync({
+      taskId: taskId,
+      status: nextStatus,
+    }).catch((err: unknown) => console.warn("[Tasks] Status sync queued:", err));
   };
 
   const openNavigation = (lat?: string, lng?: string, address?: string) => {

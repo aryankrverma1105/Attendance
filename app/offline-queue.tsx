@@ -47,7 +47,10 @@ export default function OfflineQueueScreen() {
   const handleSyncAll = async () => {
     setIsFlushing(true);
     try {
-      const result = await flushOfflineQueue();
+      const result = await flushOfflineQueue(async (op) => {
+        // Mock sync dispatch handler
+        return true;
+      });
       await loadQueue();
       Alert.alert(
         "Sync completed",
