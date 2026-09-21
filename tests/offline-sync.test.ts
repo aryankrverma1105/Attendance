@@ -6,8 +6,45 @@ import {
   removeOperation,
   flushOfflineQueue,
   getExponentialBackoffMs,
+  resetStuckSyncingOperations,
+  dispatchQueuedOperation,
   type QueuedOperation,
 } from "../lib/offline-sync";
+
+// Mock trpcClient
+vi.mock("@/lib/trpc", () => ({
+  trpcClient: {
+    attendance: {
+      checkIn: { mutate: vi.fn(async () => ({ id: "att-mock-1", status: "verified" })) },
+      checkOut: { mutate: vi.fn(async () => ({ success: true })) },
+    },
+    tracking: {
+      recordPoint: { mutate: vi.fn(async () => ({ id: "point-mock-1" })) },
+    },
+    tasks: {
+      create: { mutate: vi.fn(async () => ({ id: "task-mock-1" })) },
+      updateStatus: { mutate: vi.fn(async () => ({ success: true })) },
+    },
+    customers: {
+      create: { mutate: vi.fn(async () => ({ id: "cust-mock-1" })) },
+      update: { mutate: vi.fn(async () => ({ success: true })) },
+    },
+    visits: {
+      create: { mutate: vi.fn(async () => ({ id: "visit-mock-1" })) },
+      checkIn: { mutate: vi.fn(async () => ({ success: true })) },
+      updateNotes: { mutate: vi.fn(async () => ({ success: true })) },
+      complete: { mutate: vi.fn(async () => ({ success: true })) },
+      addEvidence: { mutate: vi.fn(async () => ({ id: "evidence-mock-1" })) },
+    },
+    expenses: {
+      create: { mutate: vi.fn(async () => ({ id: "expense-mock-1" })) },
+    },
+    chat: {
+      getOrCreateChannel: { mutate: vi.fn(async () => ({ id: "chan-mock-1" })) },
+      sendMessage: { mutate: vi.fn(async () => ({ id: "msg-mock-1" })) },
+    },
+  },
+}));
 
 // Mock AsyncStorage in-memory
 const storage = new Map<string, string>();
@@ -137,5 +174,56 @@ describe("Offline Synchronization Engine", () => {
 
     const finalQueue = await getOfflineQueue();
     expect(finalQueue.length).toBe(0);
+  });
+
+  it("resets stuck syncing operations to failed on startup", async () => {
+    const op = await enqueueOperation("TASK_UPDATE", { taskId: "t-stuck", status: "IN_PROGRESS" });
+    await updateOperationStatus(op.operationId, { status: "syncing" });
+
+    const beforeReset = await getOfflineQueue();
+    expect(beforeReset[0].status).toBe("syncing");
+
+    const resetCount = await resetStuckSyncingOperations();
+    expect(resetCount).toBe(1);
+
+    const afterReset = await getOfflineQueue();
+    expect(afterReset[0].status).toBe("failed");
+    expect(afterReset[0].error).toContain("Interrupted");
+  });
+
+  it("dispatches queued operations to matching tRPC procedures", async () => {
+    const checkInOp = await enqueueOperation("ATTENDANCE_CHECK_IN", {
+      checkInPhotoUri: "photo.jpg",
+      checkInLat: "28.6",
+      checkInLng: "77.2",
+      checkInAccuracy: 10,
+    });
+    const taskCreateOp = await enqueueOperation("TASK_CREATE", {
+      title: "Inspect Inverter",
+      assignedToUserId: 5,
+      scheduledDate: "2026-09-18",
+    });
+    const visitNotesOp = await enqueueOperation("VISIT_UPDATE_NOTES", {
+      visitId: "v-1",
+      notes: "Customer confirmed installation date",
+      meetingOutcome: "Agreed",
+    });
+    const chatOp = await enqueueOperation("CHAT_MESSAGE", {
+      channelId: "chan-1",
+      message: "On site now",
+    });
+
+    expect(await dispatchQueuedOperation(checkInOp)).toBe(true);
+    expect(await dispatchQueuedOperation(taskCreateOp)).toBe(true);
+    expect(await dispatchQueuedOperation(visitNotesOp)).toBe(true);
+    expect(await dispatchQueuedOperation(chatOp)).toBe(true);
+
+    // Drain entire queue with dispatchQueuedOperation
+    const flushResult = await flushOfflineQueue(dispatchQueuedOperation);
+    expect(flushResult.failed).toBe(0);
+    expect(flushResult.succeeded).toBe(4);
+
+    const remaining = await getOfflineQueue();
+    expect(remaining.length).toBe(0);
   });
 });

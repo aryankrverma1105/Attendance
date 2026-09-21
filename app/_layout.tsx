@@ -16,12 +16,14 @@ import type { EdgeInsets, Metrics, Rect } from "react-native-safe-area-context";
 
 import { FieldDataProvider, useFieldData } from "@/lib/field-data";
 import { ThemeProvider } from "@/lib/theme-provider";
-import { trpc, createTRPCClient } from "@/lib/trpc";
+import { trpc, trpcClient } from "@/lib/trpc";
 import { initManusRuntime, subscribeSafeAreaInsets } from "@/lib/_core/manus-runtime";
 import "@/lib/location-tracking";
 import "@/lib/_core/nativewind-pressable";
 import { getSessionRedirect } from "@/lib/session-routing";
 import { registerForPushNotificationsAsync, setupNotificationListeners } from "@/lib/push-notifications";
+import * as Network from "expo-network";
+import { resetStuckSyncingOperations, flushOfflineQueue, dispatchQueuedOperation } from "@/lib/offline-sync";
 
 const DEFAULT_WEB_INSETS: EdgeInsets = { top: 0, right: 0, bottom: 0, left: 0 };
 const DEFAULT_WEB_FRAME: Rect = { x: 0, y: 0, width: 0, height: 0 };
@@ -138,7 +140,40 @@ export default function RootLayout() {
   const [queryClient] = useState(
     () => new QueryClient({ defaultOptions: { queries: { refetchOnWindowFocus: false, retry: 1 } } }),
   );
-  const [trpcClient] = useState(() => createTRPCClient());
+
+  useEffect(() => {
+    // 1. Reset any operations stuck in "syncing" status back to "failed" on app launch
+    resetStuckSyncingOperations().catch((err) =>
+      console.warn("[OfflineSync] Reset stuck operations error:", err)
+    );
+
+    // 2. Initial queue flush
+    flushOfflineQueue(dispatchQueuedOperation).catch(() => {});
+
+    // 3. Auto-flush when network connectivity is restored
+    let netSub: { remove: () => void } | null = null;
+    try {
+      netSub = Network.addNetworkStateListener((state) => {
+        if (state.isConnected && state.isInternetReachable) {
+          flushOfflineQueue(dispatchQueuedOperation).catch(() => {});
+        }
+      });
+    } catch (netErr) {
+      console.warn("[OfflineSync] Network listener setup error:", netErr);
+    }
+
+    // 4. Auto-flush when app returns to foreground
+    const appStateSub = AppState.addEventListener("change", (state: AppStateStatus) => {
+      if (state === "active") {
+        flushOfflineQueue(dispatchQueuedOperation).catch(() => {});
+      }
+    });
+
+    return () => {
+      netSub?.remove();
+      appStateSub.remove();
+    };
+  }, []);
 
   const providerInitialMetrics = useMemo(() => {
     const metrics = initialWindowMetrics ?? { insets: initialInsets, frame: initialFrame };

@@ -32,6 +32,8 @@ import { startManagedRouteTracking, stopManagedRouteTracking, type TrackingStart
 import { shouldStartTrackingAfterAttendance } from "@/lib/tracking-policy";
 import { shouldEscalateTrackingPermission } from "@/lib/tracking-feedback";
 import { getApiBaseUrl } from "@/constants/oauth";
+import { trpcClient } from "@/lib/trpc";
+import { enqueueOperation } from "@/lib/offline-sync";
 
 export {
   calculateEarnings,
@@ -213,6 +215,168 @@ export async function syncUsersWithServer(usersToSync?: ManagedUser[]): Promise<
   return null;
 }
 
+async function hydrateFromServer(
+  current: FieldWorkspace,
+  session: FieldSession
+): Promise<Partial<FieldWorkspace>> {
+  const updates: Partial<FieldWorkspace> = {};
+
+  try {
+    // 1. Tasks
+    const serverTasks = await trpcClient.tasks.listAllTasks.query().catch(() => null);
+    if (serverTasks && Array.isArray(serverTasks)) {
+      const localTasks = current.tasks || [];
+      const taskMap = new Map(localTasks.map((t) => [t.id, t]));
+      for (const st of serverTasks) {
+        const existing = taskMap.get(st.id);
+        if (!existing) {
+          taskMap.set(st.id, {
+            id: st.id,
+            title: st.title,
+            description: st.description || undefined,
+            assignedToUserId: String(st.assignedToUserId),
+            assignedByUserId: String(st.assignedByUserId),
+            scheduledDate: st.scheduledDate,
+            priority: st.priority,
+            status: st.status,
+            locationAddress: st.locationAddress || undefined,
+            customerName: st.customerName || undefined,
+            startedAt: st.startedAt ? new Date(st.startedAt).toISOString() : undefined,
+            completedAt: st.completedAt ? new Date(st.completedAt).toISOString() : undefined,
+            createdAt: new Date(st.createdAt).toISOString(),
+            updatedAt: new Date(st.updatedAt).toISOString(),
+          });
+        } else {
+          taskMap.set(st.id, {
+            ...existing,
+            title: st.title,
+            description: st.description || undefined,
+            scheduledDate: st.scheduledDate,
+            priority: st.priority,
+            status: st.status,
+            locationAddress: st.locationAddress || undefined,
+            customerName: st.customerName || undefined,
+            startedAt: st.startedAt ? new Date(st.startedAt).toISOString() : existing.startedAt,
+            completedAt: st.completedAt ? new Date(st.completedAt).toISOString() : existing.completedAt,
+            updatedAt: new Date(st.updatedAt).toISOString(),
+          });
+        }
+      }
+      updates.tasks = Array.from(taskMap.values());
+    }
+  } catch (e) {
+    console.warn("[Hydration] Tasks error:", e);
+  }
+
+  try {
+    // 2. Customers
+    const serverCustomers = await trpcClient.customers.list.query().catch(() => null);
+    if (serverCustomers && Array.isArray(serverCustomers)) {
+      const localCustomers = current.customers || [];
+      const custMap = new Map(localCustomers.map((c) => [c.id, c]));
+      for (const sc of serverCustomers) {
+        custMap.set(sc.id, {
+          id: sc.id,
+          name: sc.name,
+          phone: sc.phone || undefined,
+          address: sc.address || undefined,
+          latitude: sc.latitude ? parseFloat(sc.latitude) : undefined,
+          longitude: sc.longitude ? parseFloat(sc.longitude) : undefined,
+          createdAt: new Date(sc.createdAt).toISOString(),
+        });
+      }
+      updates.customers = Array.from(custMap.values());
+    }
+  } catch (e) {
+    console.warn("[Hydration] Customers error:", e);
+  }
+
+  try {
+    // 3. Visits
+    const serverVisits = await trpcClient.visits.list.query().catch(() => null);
+    if (serverVisits && Array.isArray(serverVisits)) {
+      const localVisits = current.visits || [];
+      const visitMap = new Map(localVisits.map((v) => [v.id, v]));
+      for (const sv of serverVisits) {
+        const mappedStatus: Visit["status"] =
+          sv.status === "COMPLETED"
+            ? "completed"
+            : sv.status === "IN_PROGRESS"
+            ? "checked-in"
+            : "scheduled";
+        const existing = visitMap.get(sv.id);
+        if (!existing) {
+          visitMap.set(sv.id, {
+            id: sv.id,
+            customerId: sv.customerId,
+            employeeId: sv.employeeUserId ? String(sv.employeeUserId) : undefined,
+            scheduledFor: new Date(sv.scheduledFor).toISOString(),
+            status: mappedStatus,
+            checkInAt: sv.checkInAt ? new Date(sv.checkInAt).toISOString() : undefined,
+            checkOutAt: sv.checkOutAt ? new Date(sv.checkOutAt).toISOString() : undefined,
+            meetingOutcome: sv.meetingOutcome || undefined,
+            notes: sv.notes || undefined,
+            followUpDate: sv.followUpDate || undefined,
+            evidenceUris: [],
+          });
+        } else {
+          visitMap.set(sv.id, {
+            ...existing,
+            scheduledFor: new Date(sv.scheduledFor).toISOString(),
+            status: mappedStatus,
+            checkInAt: sv.checkInAt ? new Date(sv.checkInAt).toISOString() : existing.checkInAt,
+            checkOutAt: sv.checkOutAt ? new Date(sv.checkOutAt).toISOString() : existing.checkOutAt,
+            meetingOutcome: sv.meetingOutcome || existing.meetingOutcome,
+            notes: sv.notes || existing.notes,
+            followUpDate: sv.followUpDate || existing.followUpDate,
+          });
+        }
+      }
+      updates.visits = Array.from(visitMap.values());
+    }
+  } catch (e) {
+    console.warn("[Hydration] Visits error:", e);
+  }
+
+  try {
+    // 4. Attendance (merge rule: any local record with syncState !== "synced" must NOT be overwritten)
+    const serverAttendance = await trpcClient.attendance.getHistory.query({}).catch(() => null);
+    if (serverAttendance && Array.isArray(serverAttendance)) {
+      const localAttendance = current.attendance || [];
+      const attMap = new Map(localAttendance.map((a) => [a.id, a]));
+      for (const sa of serverAttendance) {
+        const existing = attMap.get(sa.id);
+        if (!existing || existing.syncState === "synced") {
+          attMap.set(sa.id, {
+            id: sa.id,
+            employeeId: sa.userId ? String(sa.userId) : undefined,
+            checkInAt: new Date(sa.checkInAt).toISOString(),
+            checkOutAt: sa.checkOutAt ? new Date(sa.checkOutAt).toISOString() : undefined,
+            checkInPhotoUri: sa.checkInPhotoUri || undefined,
+            checkOutPhotoUri: sa.checkOutPhotoUri || undefined,
+            checkInLocation:
+              sa.checkInLat && sa.checkInLng
+                ? {
+                    latitude: parseFloat(sa.checkInLat),
+                    longitude: parseFloat(sa.checkInLng),
+                    accuracy: sa.checkInAccuracy ?? null,
+                    capturedAt: new Date(sa.checkInAt).toISOString(),
+                  }
+                : undefined,
+            status: sa.status === "verified" ? "verified" : "review",
+            syncState: "synced",
+          });
+        }
+      }
+      updates.attendance = Array.from(attMap.values());
+    }
+  } catch (e) {
+    console.warn("[Hydration] Attendance error:", e);
+  }
+
+  return updates;
+}
+
 const persistWorkspaceToStorage = (workspace: Partial<FieldWorkspace>) => {
   const { session, ...rest } = workspace;
   AsyncStorage.setItem(FIELD_WORKSPACE_KEY, JSON.stringify(rest)).catch((e) =>
@@ -316,6 +480,29 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
     if (!isHydrated) return;
     persistWorkspaceToStorage(data);
   }, [data, isHydrated]);
+
+  // Server hydration when session becomes active (login / multi-device reload)
+  useEffect(() => {
+    if (!data.session) return;
+    let active = true;
+
+    hydrateFromServer(data, data.session)
+      .then((updates) => {
+        if (!active || Object.keys(updates).length === 0) return;
+        setData((prev) => {
+          const next = { ...prev, ...updates };
+          persistWorkspaceToStorage(next);
+          return next;
+        });
+      })
+      .catch((err) => {
+        console.warn("[Hydration] Error during server sync:", err);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [data.session?.id, data.session?.role]);
 
   const signInToPreview = useCallback((identifier: string, role?: FieldSession["role"], customDisplayName?: string) => {
     const normalizedKey = normalizeIdentifier(identifier);
@@ -614,6 +801,26 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
         ...current.offlineQueue,
       ],
     }));
+
+    const numericTarget = parseInt(input.assignedToUserId, 10);
+    if (!isNaN(numericTarget) && numericTarget > 0) {
+      const payload = {
+        title: input.title.trim(),
+        description: input.description?.trim(),
+        assignedToUserId: numericTarget,
+        scheduledDate: input.scheduledDate,
+        priority: input.priority,
+        locationAddress: input.locationAddress?.trim(),
+        customerName: input.customerName?.trim(),
+      };
+      trpcClient.tasks.create
+        .mutate(payload)
+        .catch((err) => {
+          console.warn("[Tasks] Server sync queued offline:", err);
+          enqueueOperation("TASK_CREATE", payload, "normal").catch(() => {});
+        });
+    }
+
     return taskId;
   }, [data.session?.id, data.session?.displayName]);
 
@@ -633,6 +840,14 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
         ...current.offlineQueue,
       ],
     }));
+
+    const payload = { taskId, status: newStatus };
+    trpcClient.tasks.updateStatus
+      .mutate(payload)
+      .catch((err) => {
+        console.warn("[Tasks] Server updateStatus queued offline:", err);
+        enqueueOperation("TASK_UPDATE", payload, "normal").catch(() => {});
+      });
   }, []);
 
   const startRouteTracking = useCallback(async () => {
@@ -642,6 +857,7 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
           ...current,
           routePoints: [...current.routePoints, { ...point, id: createId("route"), employeeId: current.session?.id }],
         }));
+        enqueueOperation("GPS_POINT", point, "low").catch(() => {});
       });
       setData((current) => ({ ...current, trackingActive: result.mode !== "idle", trackingMode: result.mode }));
       return result;
@@ -664,6 +880,8 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
     }
     const capturedAt = new Date().toISOString();
     const status = verificationStatus(input.location);
+    const operationId = createId(input.action === "check-in" ? "att-in" : "att-out");
+    const recordId = createId("attendance");
 
     setData((current) => {
       const openAttendance = current.attendance.find(
@@ -699,7 +917,7 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
       }
 
       const record: AttendanceRecord = {
-        id: createId("attendance"),
+        id: recordId,
         employeeId: current.session?.id,
         checkInAt: capturedAt,
         checkInPhotoUri: input.photoUri,
@@ -718,6 +936,56 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
         ],
       };
     });
+
+    // Server mutation with offline queue fallback
+    if (input.action === "check-in") {
+      const payload = {
+        checkInPhotoUri: input.photoUri,
+        checkInLat: String(input.location.latitude),
+        checkInLng: String(input.location.longitude),
+        checkInAccuracy: input.location.accuracy !== null ? input.location.accuracy : undefined,
+        operationId,
+        isMocked: input.location.mocked,
+      };
+      trpcClient.attendance.checkIn
+        .mutate(payload)
+        .then((res) => {
+          setData((current) => ({
+            ...current,
+            attendance: current.attendance.map((r) =>
+              r.id === recordId || (!r.checkOutAt && r.employeeId === current.session?.id)
+                ? { ...r, id: res?.id || r.id, syncState: "synced" as const }
+                : r
+            ),
+          }));
+        })
+        .catch((err) => {
+          console.warn("[Attendance] Server check-in queued offline:", err);
+          enqueueOperation("ATTENDANCE_CHECK_IN", payload, "high").catch(() => {});
+        });
+    } else {
+      const payload = {
+        checkOutPhotoUri: input.photoUri,
+        operationId,
+      };
+      trpcClient.attendance.checkOut
+        .mutate(payload)
+        .then(() => {
+          setData((current) => ({
+            ...current,
+            attendance: current.attendance.map((r) =>
+              r.checkOutAt && (r.employeeId === current.session?.id || getDayKey(r.checkInAt) === getDayKey(capturedAt))
+                ? { ...r, syncState: "synced" as const }
+                : r
+            ),
+          }));
+        })
+        .catch((err) => {
+          console.warn("[Attendance] Server check-out queued offline:", err);
+          enqueueOperation("ATTENDANCE_CHECK_OUT", payload, "high").catch(() => {});
+        });
+    }
+
     if (input.action === "check-out") {
       const trackingStopped = data.trackingActive;
       if (trackingStopped) await stopRouteTracking();
@@ -780,6 +1048,45 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
         ...current.offlineQueue,
       ],
     }));
+
+    if (input.action === "check-in") {
+      const checkInPayload = {
+        visitId: input.visitId,
+        latitude: String(input.location.latitude),
+        longitude: String(input.location.longitude),
+      };
+      trpcClient.visits.checkIn
+        .mutate(checkInPayload)
+        .catch((err) => {
+          console.warn("[Visits] Server check-in queued offline:", err);
+          enqueueOperation("VISIT_CHECK_IN", checkInPayload, "normal").catch(() => {});
+        });
+    } else {
+      const completePayload = {
+        visitId: input.visitId,
+        latitude: String(input.location.latitude),
+        longitude: String(input.location.longitude),
+      };
+      trpcClient.visits.complete
+        .mutate(completePayload)
+        .catch((err) => {
+          console.warn("[Visits] Server complete queued offline:", err);
+          enqueueOperation("VISIT_COMPLETE", completePayload, "normal").catch(() => {});
+        });
+    }
+
+    const evidencePayload = {
+      visitId: input.visitId,
+      evidenceUrl: input.photoUri,
+      latitude: String(input.location.latitude),
+      longitude: String(input.location.longitude),
+    };
+    trpcClient.visits.addEvidence
+      .mutate(evidencePayload)
+      .catch((err) => {
+        console.warn("[Visits] Server addEvidence queued offline:", err);
+        enqueueOperation("VISIT_EVIDENCE", evidencePayload, "normal").catch(() => {});
+      });
   }, []);
 
   const addCustomer = useCallback((input: Omit<Customer, "id" | "createdAt">) => {
@@ -790,6 +1097,21 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
       customers: [customer, ...current.customers],
       offlineQueue: [queueOperation("customer", `Customer “${customer.name}” awaiting secure sync`), ...current.offlineQueue],
     }));
+
+    const payload = {
+      name: input.name.trim(),
+      phone: input.phone?.trim() || undefined,
+      address: input.address?.trim() || undefined,
+      latitude: input.latitude !== undefined && input.latitude !== null ? String(input.latitude) : undefined,
+      longitude: input.longitude !== undefined && input.longitude !== null ? String(input.longitude) : undefined,
+    };
+    trpcClient.customers.create
+      .mutate(payload)
+      .catch((err) => {
+        console.warn("[Customers] Server create queued offline:", err);
+        enqueueOperation("CUSTOMER_CREATE", payload, "normal").catch(() => {});
+      });
+
     return id;
   }, []);
 
@@ -802,9 +1124,24 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
         visits: [visit, ...current.visits],
         offlineQueue: [queueOperation("visit", "New customer visit awaiting secure sync"), ...current.offlineQueue],
       }));
+
+      const empId = data.session?.id ? parseInt(data.session.id, 10) : undefined;
+      const payload = {
+        customerId: input.customerId,
+        employeeUserId: empId && !isNaN(empId) ? empId : undefined,
+        scheduledFor: input.scheduledFor,
+        notes: undefined,
+      };
+      trpcClient.visits.create
+        .mutate(payload)
+        .catch((err) => {
+          console.warn("[Visits] Server create queued offline:", err);
+          enqueueOperation("VISIT_CREATE", payload, "normal").catch(() => {});
+        });
+
       return id;
     },
-    [],
+    [data.session?.id],
   );
 
   const updateVisit = useCallback(
@@ -814,6 +1151,19 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
         visits: current.visits.map((visit) => (visit.id === visitId ? { ...visit, ...input } : visit)),
         offlineQueue: [queueOperation("visit", "Visit report awaiting secure sync"), ...current.offlineQueue],
       }));
+
+      const payload = {
+        visitId,
+        meetingOutcome: input.meetingOutcome,
+        notes: input.notes,
+        followUpDate: input.followUpDate,
+      };
+      trpcClient.visits.updateNotes
+        .mutate(payload)
+        .catch((err) => {
+          console.warn("[Visits] Server updateNotes queued offline:", err);
+          enqueueOperation("VISIT_UPDATE_NOTES", payload, "normal").catch(() => {});
+        });
     },
     [],
   );
@@ -833,11 +1183,26 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
       messages: [...current.messages, message],
       offlineQueue: [queueOperation("message", "Team message awaiting secure sync"), ...current.offlineQueue],
     }));
+
+    (async () => {
+      try {
+        const channel = await trpcClient.chat.getOrCreateChannel.mutate({ targetUserId: 1 });
+        if (channel?.id) {
+          await trpcClient.chat.sendMessage.mutate({ channelId: channel.id, message: message.text });
+        } else {
+          await enqueueOperation("CHAT_MESSAGE", { message: message.text }, "high");
+        }
+      } catch (err) {
+        console.warn("[Chat] Server sendMessage queued offline:", err);
+        await enqueueOperation("CHAT_MESSAGE", { message: message.text }, "high").catch(() => {});
+      }
+    })();
   }, []);
 
   const addRoutePoint = useCallback((point: LocationEvidence) => {
     const routePoint: RoutePoint = { ...point, id: createId("route"), employeeId: data.session?.id };
     setData((current) => ({ ...current, routePoints: [...current.routePoints, routePoint] }));
+    enqueueOperation("GPS_POINT", point, "low").catch(() => {});
   }, [data.session?.id]);
 
   const setTrackingActive = useCallback((active: boolean) => {

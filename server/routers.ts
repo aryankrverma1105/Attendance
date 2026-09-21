@@ -542,6 +542,12 @@ export const appRouter = router({
           checkInLat: z.string().optional(),
           checkInLng: z.string().optional(),
           checkInAccuracy: z.number().optional(),
+          operationId: z.string().optional(),
+          isMocked: z.boolean().optional(),
+          targetLat: z.string().optional(),
+          targetLng: z.string().optional(),
+          geofenceRadiusMeters: z.number().optional(),
+          clientCheckInAt: z.string().optional(),
         })
       )
       .mutation(async ({ ctx, input }) => {
@@ -563,6 +569,8 @@ export const appRouter = router({
       .input(
         z.object({
           checkOutPhotoUri: z.string().optional(),
+          operationId: z.string().optional(),
+          clientCheckOutAt: z.string().optional(),
         })
       )
       .mutation(async ({ ctx, input }) => {
@@ -788,6 +796,23 @@ export const appRouter = router({
         return await completeVisit(ctx.user, input.visitId, {
           latitude: input.latitude,
           longitude: input.longitude,
+          meetingOutcome: input.meetingOutcome,
+          notes: input.notes,
+          followUpDate: input.followUpDate,
+        });
+      }),
+    updateNotes: protectedProcedure
+      .input(
+        z.object({
+          visitId: z.string(),
+          meetingOutcome: z.string().optional(),
+          notes: z.string().optional(),
+          followUpDate: z.string().optional(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { updateVisitNotes } = await import("./db");
+        return await updateVisitNotes(ctx.user, input.visitId, {
           meetingOutcome: input.meetingOutcome,
           notes: input.notes,
           followUpDate: input.followUpDate,

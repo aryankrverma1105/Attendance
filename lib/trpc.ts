@@ -40,3 +40,9 @@ export function createTRPCClient() {
     ],
   });
 }
+
+/**
+ * Module-level singleton tRPC client for direct/imperative calls outside React components
+ * (offline sync, background tracking, field data callbacks) and for trpc.Provider.
+ */
+export const trpcClient = createTRPCClient();

@@ -33,6 +33,7 @@ import {
   DbVisitEvidence,
   visits,
   DbVisit,
+  InsertDbVisit,
 } from "../drizzle/schema";
 import { ENV } from "./_core/env";
 
@@ -1181,6 +1182,39 @@ export async function completeVisit(
       followUpDate: input.followUpDate,
     })
     .where(eq(visits.id, visitId));
+
+  const updated = await db.select().from(visits).where(eq(visits.id, visitId)).limit(1);
+  return updated[0];
+}
+
+export async function updateVisitNotes(
+  actorUser: User,
+  visitId: string,
+  input: {
+    meetingOutcome?: string;
+    notes?: string;
+    followUpDate?: string;
+  }
+): Promise<DbVisit> {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable.");
+
+  const existing = await db.select().from(visits).where(eq(visits.id, visitId)).limit(1);
+  if (existing.length === 0) throw new Error("Visit not found.");
+
+  const visit = existing[0];
+  if (actorUser.role === "employee" && visit.employeeUserId !== actorUser.id) {
+    throw new Error("Forbidden: You can only update notes for your own assigned visits.");
+  }
+
+  const updates: Partial<InsertDbVisit> = {};
+  if (input.meetingOutcome !== undefined) updates.meetingOutcome = input.meetingOutcome;
+  if (input.notes !== undefined) updates.notes = input.notes;
+  if (input.followUpDate !== undefined) updates.followUpDate = input.followUpDate;
+
+  if (Object.keys(updates).length > 0) {
+    await db.update(visits).set(updates).where(eq(visits.id, visitId));
+  }
 
   const updated = await db.select().from(visits).where(eq(visits.id, visitId)).limit(1);
   return updated[0];

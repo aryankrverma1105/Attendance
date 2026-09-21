@@ -10,6 +10,7 @@ import {
   getOfflineQueue,
   flushOfflineQueue,
   removeOperation,
+  dispatchQueuedOperation,
   type QueuedOperation,
 } from "@/lib/offline-sync";
 
@@ -24,6 +25,7 @@ const iconForType: Record<string, React.ComponentProps<typeof MaterialIcons>["na
   VISIT_CREATE: "event",
   VISIT_CHECK_IN: "where-to-vote",
   VISIT_COMPLETE: "check-circle",
+  VISIT_UPDATE_NOTES: "edit-note",
   VISIT_EVIDENCE: "photo-camera",
   EXPENSE_CREATE: "payments",
   CHAT_MESSAGE: "forum",
@@ -47,10 +49,7 @@ export default function OfflineQueueScreen() {
   const handleSyncAll = async () => {
     setIsFlushing(true);
     try {
-      const result = await flushOfflineQueue(async (op) => {
-        // Mock sync dispatch handler
-        return true;
-      });
+      const result = await flushOfflineQueue(dispatchQueuedOperation);
       await loadQueue();
       Alert.alert(
         "Sync completed",

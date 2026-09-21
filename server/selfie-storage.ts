@@ -1,6 +1,6 @@
 import fs from "fs";
 import path from "path";
-import type { Express, Request, Response } from "express";
+import express, { type Express, type Request, type Response } from "express";
 import { sdk } from "./_core/sdk";
 
 const UPLOADS_DIR = path.join(process.cwd(), "uploads", "selfies");
@@ -43,10 +43,7 @@ export function initSelfieStorage(app: Express) {
 
     res.setHeader("Cache-Control", "private, max-age=3600");
     next();
-  }, (req, res, next) => {
-    const staticMiddleware = require("express").static(path.join(process.cwd(), "uploads"));
-    return staticMiddleware(req, res, next);
-  });
+  }, express.static(path.join(process.cwd(), "uploads")));
 
   // REST API endpoint for uploading compressed selfies & visit evidence
   app.post("/api/upload-selfie", async (req: Request, res: Response) => {
