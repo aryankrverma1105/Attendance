@@ -9,6 +9,7 @@ import type {
   ChatMessage,
   Customer,
   FieldSession,
+  FieldTask,
   FieldWorkspace,
   LocationEvidence,
   ManagedUser,
@@ -215,11 +216,29 @@ export async function syncUsersWithServer(usersToSync?: ManagedUser[]): Promise<
   return null;
 }
 
-async function hydrateFromServer(
+export async function hydrateFromServer(
   current: FieldWorkspace,
   session: FieldSession
 ): Promise<Partial<FieldWorkspace>> {
   const updates: Partial<FieldWorkspace> = {};
+
+  // Inspect offline queue for any pending/queued/syncing/failed operations
+  let pendingQueueIds = new Set<string>();
+  try {
+    const { getOfflineQueue } = await import("@/lib/offline-sync");
+    const queue = await getOfflineQueue();
+    for (const op of queue) {
+      if (op.status === "queued" || op.status === "syncing" || op.status === "failed") {
+        const p = op.payload || {};
+        if (p.taskId) pendingQueueIds.add(String(p.taskId));
+        if (p.id) pendingQueueIds.add(String(p.id));
+        if (p.visitId) pendingQueueIds.add(String(p.visitId));
+        if (p.customerId) pendingQueueIds.add(String(p.customerId));
+      }
+    }
+  } catch (err) {
+    console.warn("[Hydration] Could not inspect offline queue:", err);
+  }
 
   try {
     // 1. Tasks
@@ -229,6 +248,10 @@ async function hydrateFromServer(
       const taskMap = new Map(localTasks.map((t) => [t.id, t]));
       for (const st of serverTasks) {
         const existing = taskMap.get(st.id);
+        const isPending =
+          existing &&
+          (existing.syncState !== "synced" || pendingQueueIds.has(st.id));
+
         if (!existing) {
           taskMap.set(st.id, {
             id: st.id,
@@ -245,8 +268,9 @@ async function hydrateFromServer(
             completedAt: st.completedAt ? new Date(st.completedAt).toISOString() : undefined,
             createdAt: new Date(st.createdAt).toISOString(),
             updatedAt: new Date(st.updatedAt).toISOString(),
+            syncState: "synced",
           });
-        } else {
+        } else if (!isPending) {
           taskMap.set(st.id, {
             ...existing,
             title: st.title,
@@ -259,6 +283,7 @@ async function hydrateFromServer(
             startedAt: st.startedAt ? new Date(st.startedAt).toISOString() : existing.startedAt,
             completedAt: st.completedAt ? new Date(st.completedAt).toISOString() : existing.completedAt,
             updatedAt: new Date(st.updatedAt).toISOString(),
+            syncState: "synced",
           });
         }
       }
@@ -275,15 +300,33 @@ async function hydrateFromServer(
       const localCustomers = current.customers || [];
       const custMap = new Map(localCustomers.map((c) => [c.id, c]));
       for (const sc of serverCustomers) {
-        custMap.set(sc.id, {
-          id: sc.id,
-          name: sc.name,
-          phone: sc.phone || undefined,
-          address: sc.address || undefined,
-          latitude: sc.latitude ? parseFloat(sc.latitude) : undefined,
-          longitude: sc.longitude ? parseFloat(sc.longitude) : undefined,
-          createdAt: new Date(sc.createdAt).toISOString(),
-        });
+        const existing = custMap.get(sc.id);
+        const isPending =
+          existing &&
+          (existing.syncState !== "synced" || pendingQueueIds.has(sc.id));
+
+        if (!existing) {
+          custMap.set(sc.id, {
+            id: sc.id,
+            name: sc.name,
+            phone: sc.phone || undefined,
+            address: sc.address || undefined,
+            latitude: sc.latitude ? parseFloat(sc.latitude) : undefined,
+            longitude: sc.longitude ? parseFloat(sc.longitude) : undefined,
+            createdAt: new Date(sc.createdAt).toISOString(),
+            syncState: "synced",
+          });
+        } else if (!isPending) {
+          custMap.set(sc.id, {
+            ...existing,
+            name: sc.name,
+            phone: sc.phone || undefined,
+            address: sc.address || undefined,
+            latitude: sc.latitude ? parseFloat(sc.latitude) : undefined,
+            longitude: sc.longitude ? parseFloat(sc.longitude) : undefined,
+            syncState: "synced",
+          });
+        }
       }
       updates.customers = Array.from(custMap.values());
     }
@@ -305,6 +348,10 @@ async function hydrateFromServer(
             ? "checked-in"
             : "scheduled";
         const existing = visitMap.get(sv.id);
+        const isPending =
+          existing &&
+          (existing.syncState !== "synced" || pendingQueueIds.has(sv.id));
+
         if (!existing) {
           visitMap.set(sv.id, {
             id: sv.id,
@@ -318,8 +365,9 @@ async function hydrateFromServer(
             notes: sv.notes || undefined,
             followUpDate: sv.followUpDate || undefined,
             evidenceUris: [],
+            syncState: "synced",
           });
-        } else {
+        } else if (!isPending) {
           visitMap.set(sv.id, {
             ...existing,
             scheduledFor: new Date(sv.scheduledFor).toISOString(),
@@ -329,6 +377,7 @@ async function hydrateFromServer(
             meetingOutcome: sv.meetingOutcome || existing.meetingOutcome,
             notes: sv.notes || existing.notes,
             followUpDate: sv.followUpDate || existing.followUpDate,
+            syncState: "synced",
           });
         }
       }
@@ -339,16 +388,40 @@ async function hydrateFromServer(
   }
 
   try {
-    // 4. Attendance (merge rule: any local record with syncState !== "synced" must NOT be overwritten)
+    // 4. Attendance (merge rule: any local record with syncState !== "synced" or in pending queue must NOT be overwritten)
     const serverAttendance = await trpcClient.attendance.getHistory.query({}).catch(() => null);
     if (serverAttendance && Array.isArray(serverAttendance)) {
       const localAttendance = current.attendance || [];
       const attMap = new Map(localAttendance.map((a) => [a.id, a]));
       for (const sa of serverAttendance) {
         const existing = attMap.get(sa.id);
-        if (!existing || existing.syncState === "synced") {
+        const isPending =
+          existing &&
+          (existing.syncState !== "synced" || pendingQueueIds.has(sa.id));
+
+        if (!existing) {
           attMap.set(sa.id, {
             id: sa.id,
+            employeeId: sa.userId ? String(sa.userId) : undefined,
+            checkInAt: new Date(sa.checkInAt).toISOString(),
+            checkOutAt: sa.checkOutAt ? new Date(sa.checkOutAt).toISOString() : undefined,
+            checkInPhotoUri: sa.checkInPhotoUri || undefined,
+            checkOutPhotoUri: sa.checkOutPhotoUri || undefined,
+            checkInLocation:
+              sa.checkInLat && sa.checkInLng
+                ? {
+                    latitude: parseFloat(sa.checkInLat),
+                    longitude: parseFloat(sa.checkInLng),
+                    accuracy: sa.checkInAccuracy ?? null,
+                    capturedAt: new Date(sa.checkInAt).toISOString(),
+                  }
+                : undefined,
+            status: sa.status === "verified" ? "verified" : "review",
+            syncState: "synced",
+          });
+        } else if (!isPending) {
+          attMap.set(sa.id, {
+            ...existing,
             employeeId: sa.userId ? String(sa.userId) : undefined,
             checkInAt: new Date(sa.checkInAt).toISOString(),
             checkOutAt: sa.checkOutAt ? new Date(sa.checkOutAt).toISOString() : undefined,
@@ -776,7 +849,7 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
   }) => {
     const taskId = createId("task");
     const now = new Date().toISOString();
-    const newTask = {
+    const newTask: FieldTask = {
       id: taskId,
       title: input.title.trim(),
       description: input.description?.trim(),
@@ -791,6 +864,7 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
       customerName: input.customerName,
       createdAt: now,
       updatedAt: now,
+      syncState: "awaiting-server",
     };
 
     setData((current) => ({
@@ -815,9 +889,17 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
       };
       trpcClient.tasks.create
         .mutate(payload)
+        .then((res) => {
+          setData((current) => ({
+            ...current,
+            tasks: current.tasks.map((t) =>
+              t.id === taskId ? { ...t, id: res?.id ? String(res.id) : t.id, syncState: "synced" as const } : t
+            ),
+          }));
+        })
         .catch((err) => {
           console.warn("[Tasks] Server sync queued offline:", err);
-          enqueueOperation("TASK_CREATE", payload, "normal").catch(() => {});
+          enqueueOperation("TASK_CREATE", { ...payload, taskId }, "normal").catch(() => {});
         });
     }
 
@@ -830,7 +912,11 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
       ...current,
       tasks: current.tasks.map((task) => {
         if (task.id !== taskId) return task;
-        const updates: Record<string, unknown> = { status: newStatus, updatedAt: now };
+        const updates: Record<string, unknown> = {
+          status: newStatus,
+          updatedAt: now,
+          syncState: "awaiting-server" as const,
+        };
         if (newStatus === "IN_PROGRESS" && !task.startedAt) updates.startedAt = now;
         if (newStatus === "COMPLETED") updates.completedAt = now;
         return { ...task, ...updates } as typeof task;
@@ -844,6 +930,14 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
     const payload = { taskId, status: newStatus };
     trpcClient.tasks.updateStatus
       .mutate(payload)
+      .then(() => {
+        setData((current) => ({
+          ...current,
+          tasks: current.tasks.map((t) =>
+            t.id === taskId ? { ...t, syncState: "synced" as const } : t
+          ),
+        }));
+      })
       .catch((err) => {
         console.warn("[Tasks] Server updateStatus queued offline:", err);
         enqueueOperation("TASK_UPDATE", payload, "normal").catch(() => {});
@@ -1030,6 +1124,7 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
               checkInAt: capturedAt,
               checkInLocation: input.location,
               evidenceUris,
+              syncState: "awaiting-server" as const,
             }
           : {
               ...visit,
@@ -1037,6 +1132,7 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
               checkOutAt: capturedAt,
               checkOutLocation: input.location,
               evidenceUris,
+              syncState: "awaiting-server" as const,
             };
       }),
       offlineQueue: [
@@ -1057,6 +1153,14 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
       };
       trpcClient.visits.checkIn
         .mutate(checkInPayload)
+        .then(() => {
+          setData((current) => ({
+            ...current,
+            visits: current.visits.map((v) =>
+              v.id === input.visitId ? { ...v, syncState: "synced" as const } : v
+            ),
+          }));
+        })
         .catch((err) => {
           console.warn("[Visits] Server check-in queued offline:", err);
           enqueueOperation("VISIT_CHECK_IN", checkInPayload, "normal").catch(() => {});
@@ -1069,6 +1173,14 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
       };
       trpcClient.visits.complete
         .mutate(completePayload)
+        .then(() => {
+          setData((current) => ({
+            ...current,
+            visits: current.visits.map((v) =>
+              v.id === input.visitId ? { ...v, syncState: "synced" as const } : v
+            ),
+          }));
+        })
         .catch((err) => {
           console.warn("[Visits] Server complete queued offline:", err);
           enqueueOperation("VISIT_COMPLETE", completePayload, "normal").catch(() => {});
@@ -1083,6 +1195,14 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
     };
     trpcClient.visits.addEvidence
       .mutate(evidencePayload)
+      .then(() => {
+        setData((current) => ({
+          ...current,
+          visits: current.visits.map((v) =>
+            v.id === input.visitId ? { ...v, syncState: "synced" as const } : v
+          ),
+        }));
+      })
       .catch((err) => {
         console.warn("[Visits] Server addEvidence queued offline:", err);
         enqueueOperation("VISIT_EVIDENCE", evidencePayload, "normal").catch(() => {});
@@ -1091,7 +1211,12 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
 
   const addCustomer = useCallback((input: Omit<Customer, "id" | "createdAt">) => {
     const id = createId("customer");
-    const customer: Customer = { ...input, id, createdAt: new Date().toISOString() };
+    const customer: Customer = {
+      ...input,
+      id,
+      createdAt: new Date().toISOString(),
+      syncState: "awaiting-server",
+    };
     setData((current) => ({
       ...current,
       customers: [customer, ...current.customers],
@@ -1107,9 +1232,17 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
     };
     trpcClient.customers.create
       .mutate(payload)
+      .then((res) => {
+        setData((current) => ({
+          ...current,
+          customers: current.customers.map((c) =>
+            c.id === id ? { ...c, id: res?.id ? String(res.id) : c.id, syncState: "synced" as const } : c
+          ),
+        }));
+      })
       .catch((err) => {
         console.warn("[Customers] Server create queued offline:", err);
-        enqueueOperation("CUSTOMER_CREATE", payload, "normal").catch(() => {});
+        enqueueOperation("CUSTOMER_CREATE", { ...payload, id }, "normal").catch(() => {});
       });
 
     return id;
@@ -1118,7 +1251,14 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
   const createVisit = useCallback(
     (input: Omit<Visit, "id" | "employeeId" | "status" | "checkInAt" | "checkOutAt" | "checkInLocation" | "checkOutLocation" | "evidenceUris" | "meetingOutcome" | "notes" | "followUpDate">) => {
       const id = createId("visit");
-      const visit: Visit = { ...input, id, employeeId: data.session?.id, status: "scheduled", evidenceUris: [] };
+      const visit: Visit = {
+        ...input,
+        id,
+        employeeId: data.session?.id,
+        status: "scheduled",
+        evidenceUris: [],
+        syncState: "awaiting-server",
+      };
       setData((current) => ({
         ...current,
         visits: [visit, ...current.visits],
@@ -1134,9 +1274,17 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
       };
       trpcClient.visits.create
         .mutate(payload)
+        .then((res) => {
+          setData((current) => ({
+            ...current,
+            visits: current.visits.map((v) =>
+              v.id === id ? { ...v, id: res?.id ? String(res.id) : v.id, syncState: "synced" as const } : v
+            ),
+          }));
+        })
         .catch((err) => {
           console.warn("[Visits] Server create queued offline:", err);
-          enqueueOperation("VISIT_CREATE", payload, "normal").catch(() => {});
+          enqueueOperation("VISIT_CREATE", { ...payload, id }, "normal").catch(() => {});
         });
 
       return id;
@@ -1148,7 +1296,9 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
     (visitId: string, input: Pick<Visit, "meetingOutcome" | "notes" | "followUpDate">) => {
       setData((current) => ({
         ...current,
-        visits: current.visits.map((visit) => (visit.id === visitId ? { ...visit, ...input } : visit)),
+        visits: current.visits.map((visit) =>
+          visit.id === visitId ? { ...visit, ...input, syncState: "awaiting-server" as const } : visit
+        ),
         offlineQueue: [queueOperation("visit", "Visit report awaiting secure sync"), ...current.offlineQueue],
       }));
 
@@ -1160,6 +1310,14 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
       };
       trpcClient.visits.updateNotes
         .mutate(payload)
+        .then(() => {
+          setData((current) => ({
+            ...current,
+            visits: current.visits.map((v) =>
+              v.id === visitId ? { ...v, syncState: "synced" as const } : v
+            ),
+          }));
+        })
         .catch((err) => {
           console.warn("[Visits] Server updateNotes queued offline:", err);
           enqueueOperation("VISIT_UPDATE_NOTES", payload, "normal").catch(() => {});

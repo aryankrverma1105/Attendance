@@ -211,6 +211,84 @@ export async function resetStuckSyncingOperations(): Promise<number> {
   return resetCount;
 }
 
+const FIELD_WORKSPACE_KEY = "fieldpulse.workspace.v1";
+
+/**
+ * When a queued operation succeeds, flip the record's syncState in persistent storage to "synced".
+ */
+async function markRecordSyncedInStorage(op: QueuedOperation): Promise<void> {
+  try {
+    const raw = await AsyncStorage.getItem(FIELD_WORKSPACE_KEY);
+    if (!raw) return;
+    const ws = JSON.parse(raw);
+    const p = op.payload || {};
+    let modified = false;
+
+    if (op.type === "TASK_CREATE" || op.type === "TASK_UPDATE") {
+      const taskId = p.taskId || p.id;
+      if (Array.isArray(ws.tasks)) {
+        ws.tasks = ws.tasks.map((t: any) => {
+          if (t.id === taskId || (op.type === "TASK_CREATE" && t.title === p.title && t.scheduledDate === p.scheduledDate)) {
+            modified = true;
+            return { ...t, syncState: "synced" };
+          }
+          return t;
+        });
+      }
+    } else if (op.type === "CUSTOMER_CREATE" || op.type === "CUSTOMER_UPDATE") {
+      const custId = p.id;
+      if (Array.isArray(ws.customers)) {
+        ws.customers = ws.customers.map((c: any) => {
+          if (c.id === custId || (op.type === "CUSTOMER_CREATE" && c.name === p.name)) {
+            modified = true;
+            return { ...c, syncState: "synced" };
+          }
+          return c;
+        });
+      }
+    } else if (
+      op.type === "VISIT_CREATE" ||
+      op.type === "VISIT_CHECK_IN" ||
+      op.type === "VISIT_COMPLETE" ||
+      op.type === "VISIT_UPDATE_NOTES" ||
+      op.type === "VISIT_EVIDENCE"
+    ) {
+      const visitId = p.visitId || p.id;
+      if (Array.isArray(ws.visits)) {
+        ws.visits = ws.visits.map((v: any) => {
+          if (
+            v.id === visitId ||
+            (op.type === "VISIT_CREATE" && v.customerId === p.customerId && v.scheduledFor === p.scheduledFor)
+          ) {
+            modified = true;
+            return { ...v, syncState: "synced" };
+          }
+          return v;
+        });
+      }
+    } else if (op.type === "ATTENDANCE_CHECK_IN" || op.type === "ATTENDANCE_CHECK_OUT") {
+      if (Array.isArray(ws.attendance)) {
+        ws.attendance = ws.attendance.map((a: any) => {
+          if (
+            (op.type === "ATTENDANCE_CHECK_IN" && (a.id === p.id || a.checkInAt === p.clientCheckInAt)) ||
+            (op.type === "ATTENDANCE_CHECK_OUT" && a.checkOutAt === p.clientCheckOutAt)
+          ) {
+            modified = true;
+            return { ...a, syncState: "synced" };
+          }
+          return a;
+        });
+      }
+    }
+
+    if (modified) {
+      await AsyncStorage.setItem(FIELD_WORKSPACE_KEY, JSON.stringify(ws));
+    }
+  } catch (err) {
+    console.warn("[OfflineSync] Failed to mark record synced in storage:", err);
+  }
+}
+
 /**
  * Real tRPC dispatcher that maps every OperationType to its corresponding server mutation.
  * Returns true only on confirmed server success; throws/returns false on failure.
@@ -232,6 +310,7 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
         geofenceRadiusMeters: p.geofenceRadiusMeters !== undefined && p.geofenceRadiusMeters !== null ? Number(p.geofenceRadiusMeters) : undefined,
         clientCheckInAt: p.clientCheckInAt || op.createdAt,
       });
+      await markRecordSyncedInStorage(op);
       return true;
     }
 
@@ -241,6 +320,7 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
         operationId: op.operationId || p.operationId,
         clientCheckOutAt: p.clientCheckOutAt || op.createdAt,
       });
+      await markRecordSyncedInStorage(op);
       return true;
     }
 
@@ -253,6 +333,7 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
         accuracy: p.accuracy !== undefined && p.accuracy !== null ? Math.round(Number(p.accuracy)) : undefined,
         address: p.address,
       });
+      await markRecordSyncedInStorage(op);
       return true;
     }
 
@@ -272,6 +353,7 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
         locationAddress: p.locationAddress,
         customerName: p.customerName,
       });
+      await markRecordSyncedInStorage(op);
       return true;
     }
 
@@ -280,6 +362,7 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
         taskId: String(p.taskId),
         status: p.status,
       });
+      await markRecordSyncedInStorage(op);
       return true;
     }
 
@@ -293,6 +376,7 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
         longitude: p.longitude !== undefined && p.longitude !== null ? String(p.longitude) : undefined,
         notes: p.notes,
       });
+      await markRecordSyncedInStorage(op);
       return true;
     }
 
@@ -308,6 +392,7 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
         notes: p.notes,
         status: p.status,
       });
+      await markRecordSyncedInStorage(op);
       return true;
     }
 
@@ -319,6 +404,7 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
         scheduledFor: p.scheduledFor ? new Date(p.scheduledFor).toISOString() : new Date().toISOString(),
         notes: p.notes,
       });
+      await markRecordSyncedInStorage(op);
       return true;
     }
 
@@ -328,6 +414,7 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
         latitude: p.latitude !== undefined && p.latitude !== null ? String(p.latitude) : undefined,
         longitude: p.longitude !== undefined && p.longitude !== null ? String(p.longitude) : undefined,
       });
+      await markRecordSyncedInStorage(op);
       return true;
     }
 
@@ -338,6 +425,7 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
         notes: p.notes,
         followUpDate: p.followUpDate,
       });
+      await markRecordSyncedInStorage(op);
       return true;
     }
 
@@ -350,6 +438,7 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
         notes: p.notes,
         followUpDate: p.followUpDate,
       });
+      await markRecordSyncedInStorage(op);
       return true;
     }
 
@@ -360,6 +449,7 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
         latitude: p.latitude !== undefined && p.latitude !== null ? String(p.latitude) : undefined,
         longitude: p.longitude !== undefined && p.longitude !== null ? String(p.longitude) : undefined,
       });
+      await markRecordSyncedInStorage(op);
       return true;
     }
 
@@ -371,6 +461,7 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
         receiptUrl: p.receiptUrl,
         expenseDate: p.expenseDate || new Date().toISOString().slice(0, 10),
       });
+      await markRecordSyncedInStorage(op);
       return true;
     }
 
@@ -385,6 +476,7 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
         channelId,
         message: String(p.message || p.text),
       });
+      await markRecordSyncedInStorage(op);
       return true;
     }
 

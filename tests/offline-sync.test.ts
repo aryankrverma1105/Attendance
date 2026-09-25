@@ -226,4 +226,20 @@ describe("Offline Synchronization Engine", () => {
     const remaining = await getOfflineQueue();
     expect(remaining.length).toBe(0);
   });
+
+  it("flips record syncState in storage to synced when dispatchQueuedOperation succeeds", async () => {
+    const initialWorkspace = {
+      tasks: [{ id: "task-offline-1", title: "Task 1", syncState: "awaiting-server" }],
+      customers: [{ id: "cust-offline-1", name: "Cust 1", syncState: "awaiting-server" }],
+      visits: [{ id: "visit-offline-1", customerId: "c1", syncState: "awaiting-server" }],
+      attendance: [{ id: "att-offline-1", checkInAt: "2026-09-22T08:00:00.000Z", syncState: "awaiting-server" }],
+    };
+    storage.set("fieldpulse.workspace.v1", JSON.stringify(initialWorkspace));
+
+    const taskOp = await enqueueOperation("TASK_UPDATE", { taskId: "task-offline-1", status: "COMPLETED" });
+    expect(await dispatchQueuedOperation(taskOp)).toBe(true);
+
+    const updatedWorkspace = JSON.parse(storage.get("fieldpulse.workspace.v1")!);
+    expect(updatedWorkspace.tasks[0].syncState).toBe("synced");
+  });
 });

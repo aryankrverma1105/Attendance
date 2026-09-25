@@ -82,6 +82,7 @@ export type Customer = {
   latitude?: number;
   longitude?: number;
   createdAt: string;
+  syncState?: "pending" | "awaiting-server" | "synced";
 };
 
 export type VisitStatus = "scheduled" | "checked-in" | "completed";
@@ -100,6 +101,7 @@ export type Visit = {
   meetingOutcome?: string;
   notes?: string;
   followUpDate?: string;
+  syncState?: "pending" | "awaiting-server" | "synced";
 };
 
 export type ChatMessage = {
@@ -155,7 +157,10 @@ export type FieldTask = {
   completedAt?: string;
   createdAt: string;
   updatedAt: string;
+  syncState?: "pending" | "awaiting-server" | "synced";
 };
+
+export type Task = FieldTask;
 
 export type DayGpsTimelinePoint = {
   id: string;
