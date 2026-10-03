@@ -72,6 +72,29 @@ async function migrate() {
   await addCol("chat_messages", "operationId", "varchar(128) NULL");
   await addUnique("chat_messages", "chat_messages_operationId_unique", "operationId");
 
+  await addCol("visit_evidence", "operationId", "varchar(128) NULL");
+  await addUnique("visit_evidence", "visit_evidence_operationId_unique", "operationId");
+
+  try {
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS idempotency_keys (
+        id varchar(36) NOT NULL PRIMARY KEY,
+        userId int NOT NULL,
+        operationType varchar(64) NOT NULL,
+        operationId varchar(128) NOT NULL,
+        recordId varchar(64),
+        responsePayload text,
+        createdAt timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY idempotency_keys_operationId_unique (operationId),
+        KEY idempotency_keys_userId_idx (userId),
+        CONSTRAINT fk_idempotency_keys_user FOREIGN KEY (userId) REFERENCES users (id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    `);
+    console.log("idempotency_keys table verified/created");
+  } catch (e: any) {
+    console.warn("Could not create idempotency_keys table:", e.message);
+  }
+
   console.log("Database schema successfully upgraded!");
   process.exit(0);
 }

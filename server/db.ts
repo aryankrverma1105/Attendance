@@ -36,6 +36,8 @@ import {
   InsertDbVisit,
   sites,
   DbSite,
+  idempotencyKeys,
+  DbIdempotencyKey,
 } from "../drizzle/schema";
 import { ENV } from "./_core/env";
 
@@ -69,6 +71,98 @@ export async function getDb() {
     }
   }
   return _db;
+}
+
+/**
+ * Verifies real database connectivity by executing a lightweight query.
+ * Returns true if DB is reachable and responding, false otherwise.
+ */
+export async function checkDbReadiness(): Promise<boolean> {
+  try {
+    const db = await getDb();
+    if (!db) return false;
+    await db.execute(sql`SELECT 1`);
+    return true;
+  } catch (err) {
+    console.warn("[Database] Readiness check failed:", err);
+    return false;
+  }
+}
+
+/**
+ * Enforces server-side idempotency bound strictly to the authenticated user ID and operation type.
+ * If another user sends the same operationId, rejects with a Forbidden error.
+ * If the same user replays an operation, returns the stored result or existing record without creating duplicates.
+ */
+export async function enforceIdempotency<T>(
+  userId: number,
+  operationType: string,
+  operationId: string | undefined,
+  execute: () => Promise<T | { recordId?: string; result: T }>
+): Promise<T> {
+  const normalize = (val: T | { recordId?: string; result: T }) => {
+    if (val && typeof val === "object" && "result" in val) {
+      return { recordId: (val as any).recordId, result: (val as any).result as T };
+    }
+    const recordId = (val && typeof val === "object" && "id" in val) ? String((val as any).id) : undefined;
+    return { recordId, result: val as T };
+  };
+
+  if (!operationId) {
+    const raw = await execute();
+    return normalize(raw).result;
+  }
+
+  const db = await getDb();
+  if (!db) {
+    const raw = await execute();
+    return normalize(raw).result;
+  }
+
+  // 1. Check if this operationId has been claimed
+  const existing = await db
+    .select()
+    .from(idempotencyKeys)
+    .where(eq(idempotencyKeys.operationId, operationId))
+    .limit(1);
+
+  if (existing.length > 0) {
+    const record = existing[0];
+    if (record.userId !== userId) {
+      throw new Error(
+        `Forbidden: Idempotency operationId '${operationId}' belongs to another user and cannot be reused.`
+      );
+    }
+    if (record.responsePayload) {
+      try {
+        return JSON.parse(record.responsePayload) as T;
+      } catch {
+        // fallback
+      }
+    }
+    return { id: record.recordId, operationId, status: "already_processed" } as unknown as T;
+  }
+
+  // 2. Execute the database operation
+  const raw = await execute();
+  const { recordId, result } = normalize(raw);
+
+  // 3. Record in idempotencyKeys
+  try {
+    const keyId = `idem-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await db.insert(idempotencyKeys).values({
+      id: keyId,
+      userId,
+      operationType,
+      operationId,
+      recordId: recordId ? String(recordId) : null,
+      responsePayload: JSON.stringify(result),
+    });
+  } catch (err) {
+    console.warn("[Idempotency] Failed to persist idempotency key:", err);
+  }
+
+  return result;
 }
 
 export async function upsertUser(user: InsertUser): Promise<void> {
@@ -667,6 +761,9 @@ export async function createTask(
   if (input.operationId) {
     const existingOp = await db.select().from(tasks).where(eq(tasks.operationId, input.operationId)).limit(1);
     if (existingOp.length > 0) {
+      if (existingOp[0].assignedByUserId && existingOp[0].assignedByUserId !== actorUser.id) {
+        throw new Error(`Forbidden: Idempotency operationId '${input.operationId}' belongs to another user.`);
+      }
       return existingOp[0];
     }
   }
@@ -684,25 +781,27 @@ export async function createTask(
     throw new Error("Forbidden: Managers can only assign tasks to employees in their own team.");
   }
 
-  const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  await db.insert(tasks).values({
-    id: taskId,
-    title: input.title.trim(),
-    description: input.description?.trim(),
-    assignedToUserId: input.assignedToUserId,
-    assignedByUserId: actorUser.id,
-    scheduledDate: input.scheduledDate,
-    priority: input.priority,
-    status: "PENDING",
-    locationLat: input.locationLat,
-    locationLng: input.locationLng,
-    locationAddress: input.locationAddress,
-    customerName: input.customerName,
-    operationId: input.operationId || null,
-  });
+  return await enforceIdempotency(actorUser.id, "TASK_CREATE", input.operationId, async () => {
+    const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await db.insert(tasks).values({
+      id: taskId,
+      title: input.title.trim(),
+      description: input.description?.trim(),
+      assignedToUserId: input.assignedToUserId,
+      assignedByUserId: actorUser.id,
+      scheduledDate: input.scheduledDate,
+      priority: input.priority,
+      status: "PENDING",
+      locationLat: input.locationLat,
+      locationLng: input.locationLng,
+      locationAddress: input.locationAddress,
+      customerName: input.customerName,
+      operationId: input.operationId || null,
+    });
 
-  const created = await db.select().from(tasks).where(eq(tasks.id, taskId)).limit(1);
-  return created[0];
+    const created = await db.select().from(tasks).where(eq(tasks.id, taskId)).limit(1);
+    return { recordId: taskId, result: created[0] };
+  });
 }
 
 export async function getTasksForUser(userId: number, date?: string): Promise<DbTask[]> {
@@ -745,37 +844,40 @@ export async function getTasksByManagerId(managerId: number, date?: string): Pro
 export async function updateTaskStatus(
   actorUser: User,
   taskId: string,
-  newStatus: "PENDING" | "IN_PROGRESS" | "COMPLETED"
+  newStatus: "PENDING" | "IN_PROGRESS" | "COMPLETED",
+  operationId?: string
 ): Promise<DbTask> {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable.");
 
-  const existing = await db.select().from(tasks).where(eq(tasks.id, taskId)).limit(1);
-  if (existing.length === 0) throw new Error("Task not found.");
+  return await enforceIdempotency(actorUser.id, "TASK_UPDATE", operationId, async () => {
+    const existing = await db.select().from(tasks).where(eq(tasks.id, taskId)).limit(1);
+    if (existing.length === 0) throw new Error("Task not found.");
 
-  const task = existing[0];
-  // Check permission:
-  if (actorUser.role === "employee") {
-    if (task.assignedToUserId !== actorUser.id) {
-      throw new Error("Forbidden: You can only update tasks assigned to yourself.");
+    const task = existing[0];
+    // Check permission:
+    if (actorUser.role === "employee") {
+      if (task.assignedToUserId !== actorUser.id) {
+        throw new Error("Forbidden: You can only update tasks assigned to yourself.");
+      }
+    } else if (actorUser.role === "manager") {
+      const targetUser = await getUserById(task.assignedToUserId);
+      if (targetUser?.managerId !== actorUser.id && task.assignedByUserId !== actorUser.id) {
+        throw new Error("Forbidden: Managers can only update tasks for their assigned team.");
+      }
     }
-  } else if (actorUser.role === "manager") {
-    const targetUser = await getUserById(task.assignedToUserId);
-    if (targetUser?.managerId !== actorUser.id && task.assignedByUserId !== actorUser.id) {
-      throw new Error("Forbidden: Managers can only update tasks for their assigned team.");
+
+    const updates: Partial<DbTask> = { status: newStatus };
+    if (newStatus === "IN_PROGRESS" && !task.startedAt) {
+      updates.startedAt = new Date();
+    } else if (newStatus === "COMPLETED") {
+      updates.completedAt = new Date();
     }
-  }
 
-  const updates: Partial<DbTask> = { status: newStatus };
-  if (newStatus === "IN_PROGRESS" && !task.startedAt) {
-    updates.startedAt = new Date();
-  } else if (newStatus === "COMPLETED") {
-    updates.completedAt = new Date();
-  }
-
-  await db.update(tasks).set(updates).where(eq(tasks.id, taskId));
-  const updated = await db.select().from(tasks).where(eq(tasks.id, taskId)).limit(1);
-  return updated[0];
+    await db.update(tasks).set(updates).where(eq(tasks.id, taskId));
+    const updated = await db.select().from(tasks).where(eq(tasks.id, taskId)).limit(1);
+    return { recordId: taskId, result: updated[0] };
+  });
 }
 
 /**
@@ -803,28 +905,33 @@ export async function recordGpsPoint(
       .where(eq(gpsPoints.operationId, point.operationId))
       .limit(1);
     if (existingOp.length > 0) {
+      if (existingOp[0].userId !== userId) {
+        throw new Error(`Forbidden: Idempotency operationId '${point.operationId}' belongs to another user.`);
+      }
       return existingOp[0];
     }
   }
 
-  const id = `gps-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const capturedAtDate = point.capturedAt ? new Date(point.capturedAt) : new Date();
+  return await enforceIdempotency(userId, "GPS_POINT", point.operationId, async () => {
+    const id = `gps-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const capturedAtDate = point.capturedAt ? new Date(point.capturedAt) : new Date();
 
-  await db.insert(gpsPoints).values({
-    id,
-    userId,
-    recordedDate: point.recordedDate,
-    latitude: point.latitude,
-    longitude: point.longitude,
-    accuracy: point.accuracy,
-    address: point.address,
-    operationId: point.operationId || null,
-    capturedAt: isNaN(capturedAtDate.getTime()) ? new Date() : capturedAtDate,
-    recordedAt: new Date(),
+    await db.insert(gpsPoints).values({
+      id,
+      userId,
+      recordedDate: point.recordedDate,
+      latitude: point.latitude,
+      longitude: point.longitude,
+      accuracy: point.accuracy,
+      address: point.address,
+      operationId: point.operationId || null,
+      capturedAt: isNaN(capturedAtDate.getTime()) ? new Date() : capturedAtDate,
+      recordedAt: new Date(),
+    });
+
+    const created = await db.select().from(gpsPoints).where(eq(gpsPoints.id, id)).limit(1);
+    return { recordId: id, result: created[0] };
   });
-
-  const created = await db.select().from(gpsPoints).where(eq(gpsPoints.id, id)).limit(1);
-  return created[0];
 }
 
 export async function getDayGpsHistory(
@@ -1001,6 +1108,9 @@ export async function recordAttendanceCheckIn(
       .where(eq(attendanceRecords.operationId, input.operationId))
       .limit(1);
     if (existingOp.length > 0) {
+      if (existingOp[0].userId !== employeeUser.id) {
+        throw new Error(`Forbidden: Idempotency operationId '${input.operationId}' belongs to another user.`);
+      }
       return existingOp[0];
     }
   }
@@ -1152,23 +1262,25 @@ export async function recordAttendanceCheckIn(
     }
   }
 
-  await db.insert(attendanceRecords).values({
-    id,
-    userId: employeeUser.id,
-    checkInAt: effectiveCheckInAt,
-    clientCheckInAt: validatedClientCheckIn,
-    status,
-    checkInPhotoUri: input.checkInPhotoUri,
-    checkInLat: input.checkInLat,
-    checkInLng: input.checkInLng,
-    checkInAccuracy: input.checkInAccuracy,
-    operationId: input.operationId || null,
-    geofenceStatus,
-    distanceMeters: minDistanceMeters,
-  });
+  return await enforceIdempotency(employeeUser.id, "ATTENDANCE_CHECK_IN", input.operationId, async () => {
+    await db.insert(attendanceRecords).values({
+      id,
+      userId: employeeUser.id,
+      checkInAt: effectiveCheckInAt,
+      clientCheckInAt: validatedClientCheckIn,
+      status,
+      checkInPhotoUri: input.checkInPhotoUri,
+      checkInLat: input.checkInLat,
+      checkInLng: input.checkInLng,
+      checkInAccuracy: input.checkInAccuracy,
+      operationId: input.operationId || null,
+      geofenceStatus,
+      distanceMeters: minDistanceMeters,
+    });
 
-  const record = await db.select().from(attendanceRecords).where(eq(attendanceRecords.id, id)).limit(1);
-  return record[0];
+    const record = await db.select().from(attendanceRecords).where(eq(attendanceRecords.id, id)).limit(1);
+    return { recordId: id, result: record[0] };
+  });
 }
 
 export async function recordAttendanceCheckOut(
@@ -1194,39 +1306,44 @@ export async function recordAttendanceCheckOut(
       .where(eq(attendanceRecords.operationId, input.operationId))
       .limit(1);
     if (existingOp.length > 0 && existingOp[0].checkOutAt) {
+      if (existingOp[0].userId !== employeeUser.id) {
+        throw new Error(`Forbidden: Idempotency operationId '${input.operationId}' belongs to another user.`);
+      }
       return existingOp[0];
     }
   }
 
-  const validatedClientCheckOut = validateClientTimestamp(input.clientCheckOutAt);
-  const now = new Date();
-  const effectiveCheckOutAt = validatedClientCheckOut || now;
+  return await enforceIdempotency(employeeUser.id, "ATTENDANCE_CHECK_OUT", input.operationId, async () => {
+    const validatedClientCheckOut = validateClientTimestamp(input.clientCheckOutAt);
+    const now = new Date();
+    const effectiveCheckOutAt = validatedClientCheckOut || now;
 
-  // Find latest active attendance record for this user
-  const activeRecords = await db
-    .select()
-    .from(attendanceRecords)
-    .where(eq(attendanceRecords.userId, employeeUser.id))
-    .orderBy(desc(attendanceRecords.checkInAt))
-    .limit(1);
+    // Find latest active attendance record for this user
+    const activeRecords = await db
+      .select()
+      .from(attendanceRecords)
+      .where(eq(attendanceRecords.userId, employeeUser.id))
+      .orderBy(desc(attendanceRecords.checkInAt))
+      .limit(1);
 
-  if (activeRecords.length === 0 || activeRecords[0].checkOutAt) {
-    throw new Error("No active check-in session found to check out from.");
-  }
+    if (activeRecords.length === 0 || activeRecords[0].checkOutAt) {
+      throw new Error("No active check-in session found to check out from.");
+    }
 
-  const targetRecord = activeRecords[0];
+    const targetRecord = activeRecords[0];
 
-  await db
-    .update(attendanceRecords)
-    .set({
-      checkOutAt: effectiveCheckOutAt,
-      clientCheckOutAt: validatedClientCheckOut,
-      checkOutPhotoUri: input.checkOutPhotoUri,
-    })
-    .where(eq(attendanceRecords.id, targetRecord.id));
+    await db
+      .update(attendanceRecords)
+      .set({
+        checkOutAt: effectiveCheckOutAt,
+        clientCheckOutAt: validatedClientCheckOut,
+        checkOutPhotoUri: input.checkOutPhotoUri,
+      })
+      .where(eq(attendanceRecords.id, targetRecord.id));
 
-  const updated = await db.select().from(attendanceRecords).where(eq(attendanceRecords.id, targetRecord.id)).limit(1);
-  return updated[0];
+    const updated = await db.select().from(attendanceRecords).where(eq(attendanceRecords.id, targetRecord.id)).limit(1);
+    return { recordId: targetRecord.id, result: updated[0] };
+  });
 }
 
 /**
@@ -1395,26 +1512,33 @@ export async function createCustomer(
 
   if (input.operationId) {
     const existingOp = await db.select().from(customers).where(eq(customers.operationId, input.operationId)).limit(1);
-    if (existingOp.length > 0) return existingOp[0];
+    if (existingOp.length > 0) {
+      if (existingOp[0].createdByUserId && existingOp[0].createdByUserId !== actorUser.id) {
+        throw new Error(`Forbidden: Idempotency operationId '${input.operationId}' belongs to another user.`);
+      }
+      return existingOp[0];
+    }
   }
 
-  const customerId = `cust-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  await db.insert(customers).values({
-    id: customerId,
-    name: input.name.trim(),
-    phone: input.phone?.trim(),
-    email: input.email?.trim(),
-    address: input.address?.trim(),
-    latitude: input.latitude,
-    longitude: input.longitude,
-    notes: input.notes?.trim(),
-    createdByUserId: actorUser.id,
-    status: "active",
-    operationId: input.operationId || null,
-  });
+  return await enforceIdempotency(actorUser.id, "CUSTOMER_CREATE", input.operationId, async () => {
+    const customerId = `cust-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await db.insert(customers).values({
+      id: customerId,
+      name: input.name.trim(),
+      phone: input.phone?.trim(),
+      email: input.email?.trim(),
+      address: input.address?.trim(),
+      latitude: input.latitude,
+      longitude: input.longitude,
+      notes: input.notes?.trim(),
+      createdByUserId: actorUser.id,
+      status: "active",
+      operationId: input.operationId || null,
+    });
 
-  const created = await db.select().from(customers).where(eq(customers.id, customerId)).limit(1);
-  return created[0];
+    const created = await db.select().from(customers).where(eq(customers.id, customerId)).limit(1);
+    return { recordId: customerId, result: created[0] };
+  });
 }
 
 export async function updateCustomer(
@@ -1429,22 +1553,28 @@ export async function updateCustomer(
     longitude: string;
     notes: string;
     status: "active" | "archived";
-  }>
+    operationId?: string;
+  }>,
+  operationId?: string
 ): Promise<DbCustomer> {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable.");
 
-  const existing = await db.select().from(customers).where(eq(customers.id, customerId)).limit(1);
-  if (existing.length === 0) throw new Error("Customer not found.");
+  const effectiveOpId = operationId || input.operationId;
+  return await enforceIdempotency(actorUser.id, "CUSTOMER_UPDATE", effectiveOpId, async () => {
+    const existing = await db.select().from(customers).where(eq(customers.id, customerId)).limit(1);
+    if (existing.length === 0) throw new Error("Customer not found.");
 
-  // Ownership check: creator, manager, or admin
-  if (actorUser.role === "employee" && existing[0].createdByUserId !== actorUser.id) {
-    throw new Error("Forbidden: You can only update customers that you created.");
-  }
+    // Ownership check: creator, manager, or admin
+    if (actorUser.role === "employee" && existing[0].createdByUserId !== actorUser.id) {
+      throw new Error("Forbidden: You can only update customers that you created.");
+    }
 
-  await db.update(customers).set(input).where(eq(customers.id, customerId));
-  const updated = await db.select().from(customers).where(eq(customers.id, customerId)).limit(1);
-  return updated[0];
+    const { operationId: _op, ...updateFields } = input;
+    await db.update(customers).set(updateFields).where(eq(customers.id, customerId));
+    const updated = await db.select().from(customers).where(eq(customers.id, customerId)).limit(1);
+    return { recordId: customerId, result: updated[0] };
+  });
 }
 
 export async function listCustomers(actorUser: User): Promise<DbCustomer[]> {
@@ -1471,40 +1601,42 @@ export async function createVisit(
     operationId?: string;
   }
 ): Promise<DbVisit> {
-  const db = await getDb();
-  if (!db) throw new Error("Database unavailable.");
+  return await enforceIdempotency<DbVisit>(actorUser.id, "VISIT_CREATE", input.operationId, async () => {
+    const db = await getDb();
+    if (!db) throw new Error("Database unavailable.");
 
-  if (input.operationId) {
-    const existingOp = await db.select().from(visits).where(eq(visits.operationId, input.operationId)).limit(1);
-    if (existingOp.length > 0) return existingOp[0];
-  }
-
-  const assignedEmployeeId = input.employeeUserId || actorUser.id;
-
-  // RBAC validation:
-  if (actorUser.role === "employee" && assignedEmployeeId !== actorUser.id) {
-    throw new Error("Forbidden: Field employees can only schedule visits for themselves.");
-  }
-  if (actorUser.role === "manager") {
-    const targetUser = await getUserById(assignedEmployeeId);
-    if (targetUser?.managerId !== actorUser.id && assignedEmployeeId !== actorUser.id) {
-      throw new Error("Forbidden: Managers can only schedule visits for members of their team.");
+    if (input.operationId) {
+      const existingOp = await db.select().from(visits).where(eq(visits.operationId, input.operationId)).limit(1);
+      if (existingOp.length > 0) return existingOp[0];
     }
-  }
 
-  const visitId = `visit-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  await db.insert(visits).values({
-    id: visitId,
-    customerId: input.customerId,
-    employeeUserId: assignedEmployeeId,
-    scheduledFor: input.scheduledFor,
-    status: "SCHEDULED",
-    notes: input.notes,
-    operationId: input.operationId || null,
+    const assignedEmployeeId = input.employeeUserId || actorUser.id;
+
+    // RBAC validation:
+    if (actorUser.role === "employee" && assignedEmployeeId !== actorUser.id) {
+      throw new Error("Forbidden: Field employees can only schedule visits for themselves.");
+    }
+    if (actorUser.role === "manager") {
+      const targetUser = await getUserById(assignedEmployeeId);
+      if (targetUser?.managerId !== actorUser.id && assignedEmployeeId !== actorUser.id) {
+        throw new Error("Forbidden: Managers can only schedule visits for members of their team.");
+      }
+    }
+
+    const visitId = `visit-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await db.insert(visits).values({
+      id: visitId,
+      customerId: input.customerId,
+      employeeUserId: assignedEmployeeId,
+      scheduledFor: input.scheduledFor,
+      status: "SCHEDULED",
+      notes: input.notes,
+      operationId: input.operationId || null,
+    });
+
+    const created = await db.select().from(visits).where(eq(visits.id, visitId)).limit(1);
+    return created[0];
   });
-
-  const created = await db.select().from(visits).where(eq(visits.id, visitId)).limit(1);
-  return created[0];
 }
 
 export async function checkInVisit(
@@ -1513,32 +1645,35 @@ export async function checkInVisit(
   input: {
     latitude?: string;
     longitude?: string;
+    operationId?: string;
   }
 ): Promise<DbVisit> {
-  const db = await getDb();
-  if (!db) throw new Error("Database unavailable.");
+  return await enforceIdempotency<DbVisit>(actorUser.id, "VISIT_CHECK_IN", input.operationId, async () => {
+    const db = await getDb();
+    if (!db) throw new Error("Database unavailable.");
 
-  const existing = await db.select().from(visits).where(eq(visits.id, visitId)).limit(1);
-  if (existing.length === 0) throw new Error("Visit not found.");
+    const existing = await db.select().from(visits).where(eq(visits.id, visitId)).limit(1);
+    if (existing.length === 0) throw new Error("Visit not found.");
 
-  const visit = existing[0];
-  if (actorUser.role === "employee" && visit.employeeUserId !== actorUser.id) {
-    throw new Error("Forbidden: You can only check in to your own assigned visits.");
-  }
+    const visit = existing[0];
+    if (actorUser.role === "employee" && visit.employeeUserId !== actorUser.id) {
+      throw new Error("Forbidden: You can only check in to your own assigned visits.");
+    }
 
-  const now = new Date();
-  await db
-    .update(visits)
-    .set({
-      status: "IN_PROGRESS",
-      checkInAt: now,
-      checkInLat: input.latitude,
-      checkInLng: input.longitude,
-    })
-    .where(eq(visits.id, visitId));
+    const now = new Date();
+    await db
+      .update(visits)
+      .set({
+        status: "IN_PROGRESS",
+        checkInAt: now,
+        checkInLat: input.latitude,
+        checkInLng: input.longitude,
+      })
+      .where(eq(visits.id, visitId));
 
-  const updated = await db.select().from(visits).where(eq(visits.id, visitId)).limit(1);
-  return updated[0];
+    const updated = await db.select().from(visits).where(eq(visits.id, visitId)).limit(1);
+    return updated[0];
+  });
 }
 
 export async function completeVisit(
@@ -1550,35 +1685,38 @@ export async function completeVisit(
     meetingOutcome?: string;
     notes?: string;
     followUpDate?: string;
+    operationId?: string;
   }
 ): Promise<DbVisit> {
-  const db = await getDb();
-  if (!db) throw new Error("Database unavailable.");
+  return await enforceIdempotency<DbVisit>(actorUser.id, "VISIT_COMPLETE", input.operationId, async () => {
+    const db = await getDb();
+    if (!db) throw new Error("Database unavailable.");
 
-  const existing = await db.select().from(visits).where(eq(visits.id, visitId)).limit(1);
-  if (existing.length === 0) throw new Error("Visit not found.");
+    const existing = await db.select().from(visits).where(eq(visits.id, visitId)).limit(1);
+    if (existing.length === 0) throw new Error("Visit not found.");
 
-  const visit = existing[0];
-  if (actorUser.role === "employee" && visit.employeeUserId !== actorUser.id) {
-    throw new Error("Forbidden: You can only complete your own assigned visits.");
-  }
+    const visit = existing[0];
+    if (actorUser.role === "employee" && visit.employeeUserId !== actorUser.id) {
+      throw new Error("Forbidden: You can only complete your own assigned visits.");
+    }
 
-  const now = new Date();
-  await db
-    .update(visits)
-    .set({
-      status: "COMPLETED",
-      checkOutAt: now,
-      checkOutLat: input.latitude,
-      checkOutLng: input.longitude,
-      meetingOutcome: input.meetingOutcome,
-      notes: input.notes,
-      followUpDate: input.followUpDate,
-    })
-    .where(eq(visits.id, visitId));
+    const now = new Date();
+    await db
+      .update(visits)
+      .set({
+        status: "COMPLETED",
+        checkOutAt: now,
+        checkOutLat: input.latitude,
+        checkOutLng: input.longitude,
+        meetingOutcome: input.meetingOutcome,
+        notes: input.notes,
+        followUpDate: input.followUpDate,
+      })
+      .where(eq(visits.id, visitId));
 
-  const updated = await db.select().from(visits).where(eq(visits.id, visitId)).limit(1);
-  return updated[0];
+    const updated = await db.select().from(visits).where(eq(visits.id, visitId)).limit(1);
+    return updated[0];
+  });
 }
 
 export async function updateVisitNotes(
@@ -1588,30 +1726,33 @@ export async function updateVisitNotes(
     meetingOutcome?: string;
     notes?: string;
     followUpDate?: string;
+    operationId?: string;
   }
 ): Promise<DbVisit> {
-  const db = await getDb();
-  if (!db) throw new Error("Database unavailable.");
+  return await enforceIdempotency<DbVisit>(actorUser.id, "VISIT_UPDATE_NOTES", input.operationId, async () => {
+    const db = await getDb();
+    if (!db) throw new Error("Database unavailable.");
 
-  const existing = await db.select().from(visits).where(eq(visits.id, visitId)).limit(1);
-  if (existing.length === 0) throw new Error("Visit not found.");
+    const existing = await db.select().from(visits).where(eq(visits.id, visitId)).limit(1);
+    if (existing.length === 0) throw new Error("Visit not found.");
 
-  const visit = existing[0];
-  if (actorUser.role === "employee" && visit.employeeUserId !== actorUser.id) {
-    throw new Error("Forbidden: You can only update notes for your own assigned visits.");
-  }
+    const visit = existing[0];
+    if (actorUser.role === "employee" && visit.employeeUserId !== actorUser.id) {
+      throw new Error("Forbidden: You can only update notes for your own assigned visits.");
+    }
 
-  const updates: Partial<InsertDbVisit> = {};
-  if (input.meetingOutcome !== undefined) updates.meetingOutcome = input.meetingOutcome;
-  if (input.notes !== undefined) updates.notes = input.notes;
-  if (input.followUpDate !== undefined) updates.followUpDate = input.followUpDate;
+    const updates: Partial<InsertDbVisit> = {};
+    if (input.meetingOutcome !== undefined) updates.meetingOutcome = input.meetingOutcome;
+    if (input.notes !== undefined) updates.notes = input.notes;
+    if (input.followUpDate !== undefined) updates.followUpDate = input.followUpDate;
 
-  if (Object.keys(updates).length > 0) {
-    await db.update(visits).set(updates).where(eq(visits.id, visitId));
-  }
+    if (Object.keys(updates).length > 0) {
+      await db.update(visits).set(updates).where(eq(visits.id, visitId));
+    }
 
-  const updated = await db.select().from(visits).where(eq(visits.id, visitId)).limit(1);
-  return updated[0];
+    const updated = await db.select().from(visits).where(eq(visits.id, visitId)).limit(1);
+    return updated[0];
+  });
 }
 
 export async function addVisitEvidence(
@@ -1621,36 +1762,45 @@ export async function addVisitEvidence(
     evidenceUrl: string;
     latitude?: string;
     longitude?: string;
+    operationId?: string;
   }
 ): Promise<DbVisitEvidence> {
-  const db = await getDb();
-  if (!db) throw new Error("Database unavailable.");
+  return await enforceIdempotency<DbVisitEvidence>(actorUser.id, "VISIT_EVIDENCE", input.operationId, async () => {
+    const db = await getDb();
+    if (!db) throw new Error("Database unavailable.");
 
-  const existingVisit = await db.select().from(visits).where(eq(visits.id, visitId)).limit(1);
-  if (existingVisit.length === 0) throw new Error("Visit not found.");
-  const visit = existingVisit[0];
+    const existingVisit = await db.select().from(visits).where(eq(visits.id, visitId)).limit(1);
+    if (existingVisit.length === 0) throw new Error("Visit not found.");
+    const visit = existingVisit[0];
 
-  // Ownership check: owner, their manager, or admin
-  if (actorUser.role === "employee" && visit.employeeUserId !== actorUser.id) {
-    throw new Error("Forbidden: Employees can only add evidence to their own visits.");
-  } else if (actorUser.role === "manager") {
-    const owner = await getUserById(visit.employeeUserId);
-    if (owner?.managerId !== actorUser.id && visit.employeeUserId !== actorUser.id) {
-      throw new Error("Forbidden: Managers can only add evidence to visits for their assigned team.");
+    // Ownership check: owner, their manager, or admin
+    if (actorUser.role === "employee" && visit.employeeUserId !== actorUser.id) {
+      throw new Error("Forbidden: Employees can only add evidence to their own visits.");
+    } else if (actorUser.role === "manager") {
+      const owner = await getUserById(visit.employeeUserId);
+      if (owner?.managerId !== actorUser.id && visit.employeeUserId !== actorUser.id) {
+        throw new Error("Forbidden: Managers can only add evidence to visits for their assigned team.");
+      }
     }
-  }
 
-  const evidenceId = `evid-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  await db.insert(visitEvidence).values({
-    id: evidenceId,
-    visitId,
-    evidenceUrl: input.evidenceUrl,
-    latitude: input.latitude,
-    longitude: input.longitude,
+    if (input.operationId) {
+      const existingEv = await db.select().from(visitEvidence).where(eq(visitEvidence.operationId, input.operationId)).limit(1);
+      if (existingEv.length > 0) return existingEv[0];
+    }
+
+    const evidenceId = `evid-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await db.insert(visitEvidence).values({
+      id: evidenceId,
+      visitId,
+      evidenceUrl: input.evidenceUrl,
+      latitude: input.latitude,
+      longitude: input.longitude,
+      operationId: input.operationId || null,
+    });
+
+    const created = await db.select().from(visitEvidence).where(eq(visitEvidence.id, evidenceId)).limit(1);
+    return created[0];
   });
-
-  const created = await db.select().from(visitEvidence).where(eq(visitEvidence.id, evidenceId)).limit(1);
-  return created[0];
 }
 
 export async function listVisits(
@@ -1728,17 +1878,40 @@ export async function getVisitDetail(
  */
 export async function getOrCreateDirectChannel(
   actorUser: User,
-  targetUserId: number
+  targetUserId?: number
 ): Promise<DbChatChannel> {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable.");
 
-  const targetUser = await getUserById(targetUserId);
+  let effectiveTargetUserId = targetUserId;
+  if (!effectiveTargetUserId) {
+    if (actorUser.role === "employee") {
+      if (actorUser.managerId) {
+        effectiveTargetUserId = actorUser.managerId;
+      } else {
+        // Resolve active admin
+        const adminUsers = await db
+          .select()
+          .from(users)
+          .where(and(eq(users.role, "admin"), eq(users.accountStatus, "active")))
+          .limit(1);
+        if (adminUsers.length > 0) {
+          effectiveTargetUserId = adminUsers[0].id;
+        } else {
+          throw new Error("Unable to resolve channel: Employee has no assigned manager or active administrator.");
+        }
+      }
+    } else {
+      throw new Error("Target user ID is required to open a direct channel.");
+    }
+  }
+
+  const targetUser = await getUserById(effectiveTargetUserId);
   if (!targetUser) throw new Error("Target user not found.");
 
   // Ownership check: only between employee and their assigned manager or admin
   if (actorUser.role === "employee") {
-    if (targetUser.role !== "admin" && actorUser.managerId !== targetUserId) {
+    if (targetUser.role !== "admin" && actorUser.managerId !== effectiveTargetUserId) {
       throw new Error("Forbidden: Employees can only chat with their assigned manager or an administrator.");
     }
   } else if (actorUser.role === "manager") {
@@ -1753,8 +1926,8 @@ export async function getOrCreateDirectChannel(
     .from(chatChannels)
     .where(
       or(
-        and(eq(chatChannels.managerUserId, actorUser.id), eq(chatChannels.employeeUserId, targetUserId)),
-        and(eq(chatChannels.managerUserId, targetUserId), eq(chatChannels.employeeUserId, actorUser.id))
+        and(eq(chatChannels.managerUserId, actorUser.id), eq(chatChannels.employeeUserId, effectiveTargetUserId)),
+        and(eq(chatChannels.managerUserId, effectiveTargetUserId), eq(chatChannels.employeeUserId, actorUser.id))
       )
     )
     .limit(1);
@@ -1767,8 +1940,8 @@ export async function getOrCreateDirectChannel(
   await db.insert(chatChannels).values({
     id: channelId,
     type: "direct",
-    managerUserId: actorUser.role === "manager" || actorUser.role === "admin" ? actorUser.id : targetUserId,
-    employeeUserId: actorUser.role === "employee" ? actorUser.id : targetUserId,
+    managerUserId: actorUser.role === "manager" || actorUser.role === "admin" ? actorUser.id : effectiveTargetUserId,
+    employeeUserId: actorUser.role === "employee" ? actorUser.id : effectiveTargetUserId,
   });
 
   const created = await db.select().from(chatChannels).where(eq(chatChannels.id, channelId)).limit(1);
@@ -1781,35 +1954,37 @@ export async function sendChatMessage(
   message: string,
   operationId?: string
 ): Promise<DbChatMessage> {
-  const db = await getDb();
-  if (!db) throw new Error("Database unavailable.");
+  return await enforceIdempotency<DbChatMessage>(actorUser.id, "CHAT_MESSAGE", operationId, async () => {
+    const db = await getDb();
+    if (!db) throw new Error("Database unavailable.");
 
-  if (operationId) {
-    const existingOp = await db.select().from(chatMessages).where(eq(chatMessages.operationId, operationId)).limit(1);
-    if (existingOp.length > 0) return existingOp[0];
-  }
+    if (operationId) {
+      const existingOp = await db.select().from(chatMessages).where(eq(chatMessages.operationId, operationId)).limit(1);
+      if (existingOp.length > 0) return existingOp[0];
+    }
 
-  const channels = await db.select().from(chatChannels).where(eq(chatChannels.id, channelId)).limit(1);
-  if (channels.length === 0) throw new Error("Chat channel not found.");
-  const chan = channels[0];
+    const channels = await db.select().from(chatChannels).where(eq(chatChannels.id, channelId)).limit(1);
+    if (channels.length === 0) throw new Error("Chat channel not found.");
+    const chan = channels[0];
 
-  // Channel membership check
-  if (actorUser.role !== "admin" && chan.managerUserId !== actorUser.id && chan.employeeUserId !== actorUser.id) {
-    throw new Error("Forbidden: You are not a member of this chat channel.");
-  }
+    // Channel membership check
+    if (actorUser.role !== "admin" && chan.managerUserId !== actorUser.id && chan.employeeUserId !== actorUser.id) {
+      throw new Error("Forbidden: You are not a member of this chat channel.");
+    }
 
-  const msgId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  await db.insert(chatMessages).values({
-    id: msgId,
-    channelId,
-    senderUserId: actorUser.id,
-    message: message.trim(),
-    status: "sent",
-    operationId: operationId || null,
+    const msgId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await db.insert(chatMessages).values({
+      id: msgId,
+      channelId,
+      senderUserId: actorUser.id,
+      message: message.trim(),
+      status: "sent",
+      operationId: operationId || null,
+    });
+
+    const created = await db.select().from(chatMessages).where(eq(chatMessages.id, msgId)).limit(1);
+    return created[0];
   });
-
-  const created = await db.select().from(chatMessages).where(eq(chatMessages.id, msgId)).limit(1);
-  return created[0];
 }
 
 export async function getChannelMessages(
@@ -1851,29 +2026,31 @@ export async function createExpense(
     operationId?: string;
   }
 ): Promise<DbExpense> {
-  const db = await getDb();
-  if (!db) throw new Error("Database unavailable.");
+  return await enforceIdempotency<DbExpense>(actorUser.id, "EXPENSE_CREATE", input.operationId, async () => {
+    const db = await getDb();
+    if (!db) throw new Error("Database unavailable.");
 
-  if (input.operationId) {
-    const existingOp = await db.select().from(expenses).where(eq(expenses.operationId, input.operationId)).limit(1);
-    if (existingOp.length > 0) return existingOp[0];
-  }
+    if (input.operationId) {
+      const existingOp = await db.select().from(expenses).where(eq(expenses.operationId, input.operationId)).limit(1);
+      if (existingOp.length > 0) return existingOp[0];
+    }
 
-  const expenseId = `exp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  await db.insert(expenses).values({
-    id: expenseId,
-    employeeUserId: actorUser.id,
-    amount: input.amount,
-    category: input.category,
-    description: input.description,
-    receiptUrl: input.receiptUrl,
-    expenseDate: input.expenseDate,
-    status: "SUBMITTED",
-    operationId: input.operationId || null,
+    const expenseId = `exp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await db.insert(expenses).values({
+      id: expenseId,
+      employeeUserId: actorUser.id,
+      amount: input.amount,
+      category: input.category,
+      description: input.description,
+      receiptUrl: input.receiptUrl,
+      expenseDate: input.expenseDate,
+      status: "SUBMITTED",
+      operationId: input.operationId || null,
+    });
+
+    const created = await db.select().from(expenses).where(eq(expenses.id, expenseId)).limit(1);
+    return created[0];
   });
-
-  const created = await db.select().from(expenses).where(eq(expenses.id, expenseId)).limit(1);
-  return created[0];
 }
 
 export async function listExpenses(

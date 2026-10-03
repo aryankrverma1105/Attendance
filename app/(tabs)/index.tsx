@@ -416,7 +416,7 @@ export default function HomeScreen() {
                 <MaterialIcons color="#D97706" name="assignment-late" size={28} />
                 <Text style={styles.emptyCardTitle}>No work orders scheduled for today.</Text>
                 <Text style={styles.emptyCardBody}>
-                  Tap 'Assign' above to dispatch maintenance or inspection tasks to your team.
+                  Tap &apos;Assign&apos; above to dispatch maintenance or inspection tasks to your team.
                 </Text>
               </Surface>
             )}
@@ -504,7 +504,7 @@ export default function HomeScreen() {
                     <View style={styles.batteryHelpRow}>
                       <MaterialIcons color="#D97706" name="battery-saver" size={14} />
                       <Text style={styles.batteryHelpText}>
-                        Tip: On Xiaomi/Samsung, disable battery optimization ("Don't Optimize") in App Settings to ensure uninterrupted route tracking while locked.
+                        Tip: On Xiaomi/Samsung, disable battery optimization (&quot;Don&apos;t Optimize&quot;) in App Settings to ensure uninterrupted route tracking while locked.
                       </Text>
                     </View>
                   ) : null}

@@ -20,7 +20,7 @@ export default function ChatScreen() {
   const isEmployee = actorRole === "employee";
 
   // Resolve real counterpart:
-  // - Employee: assigned manager ID (fallback 1)
+  // - Employee: assigned manager ID (or undefined to let server resolve)
   // - Manager/Admin: selected employee ID from params
   const counterpartUserId = useMemo(() => {
     if (params.targetUserId) {
@@ -31,7 +31,7 @@ export default function ChatScreen() {
       const m = parseInt(data.session.managerId, 10);
       if (!isNaN(m) && m > 0) return m;
     }
-    return 1;
+    return undefined;
   }, [params.targetUserId, isEmployee, data.session?.managerId]);
 
   // Resolve or create channel on backend
@@ -40,7 +40,7 @@ export default function ChatScreen() {
 
   useEffect(() => {
     getChannelMutation
-      .mutateAsync({ targetUserId: counterpartUserId })
+      .mutateAsync(counterpartUserId ? { targetUserId: counterpartUserId } : undefined)
       .then((ch) => {
         if (ch?.id) setChannelId(ch.id);
       })
@@ -89,14 +89,18 @@ export default function ChatScreen() {
         await messagesQuery.refetch();
       } catch (err) {
         console.warn("[Chat] Message send failed, queued offline:", err);
-        await enqueueOperation("CHAT_MESSAGE", { channelId, text }, "high");
+        await enqueueOperation("CHAT_MESSAGE", { channelId, text, targetUserId: counterpartUserId }, "high");
       }
     } else {
-      await enqueueOperation("CHAT_MESSAGE", { text }, "normal");
+      await enqueueOperation("CHAT_MESSAGE", { text, targetUserId: counterpartUserId }, "normal");
     }
   };
 
-  const headerTitle = isEmployee ? "Field Manager" : `Team Member #${counterpartUserId}`;
+  const headerTitle = isEmployee
+    ? "Field Manager"
+    : counterpartUserId
+      ? `Team Member #${counterpartUserId}`
+      : "Direct Channel";
 
   return (
     <ScreenContainer edges={["top", "bottom", "left", "right"]} containerClassName="bg-background" className="flex-1">
