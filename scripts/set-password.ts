@@ -59,13 +59,22 @@ async function main() {
   const passwordHash = await bcrypt.hash(newPassword.trim(), 10);
   const nextTokenVersion = (targetUser.tokenVersion ?? 1) + 1;
 
+  let nextAccountStatus = targetUser.accountStatus;
+  if (targetUser.accountStatus === "suspended") {
+    console.warn(`⚠️  Warning: User ${targetUser.id} is currently suspended. Password updated, but account remains suspended.`);
+  } else if (targetUser.accountStatus === "removed") {
+    nextAccountStatus = "removed";
+  } else {
+    nextAccountStatus = "active";
+  }
+
   await db
     .update(users)
     .set({
       passwordHash,
       tokenVersion: nextTokenVersion,
       loginMethod: "password",
-      accountStatus: targetUser.accountStatus === "removed" ? "removed" : "active",
+      accountStatus: nextAccountStatus,
     })
     .where(eq(users.id, targetUser.id));
 

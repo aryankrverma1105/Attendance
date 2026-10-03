@@ -96,11 +96,24 @@ export async function clearUserInfo(): Promise<void> {
 }
 
 let _isHandlingUnauthorized = false;
+let _unauthorizedListener: (() => void) | null = null;
+let _hasSessionFn: (() => boolean) | null = null;
+
+export function setUnauthorizedListener(fn: (() => void) | null, hasSession?: () => boolean): void {
+  _unauthorizedListener = fn;
+  if (hasSession) _hasSessionFn = hasSession;
+  else if (fn === null) _hasSessionFn = null;
+}
+
+export function getUnauthorizedListener(): (() => void) | null {
+  return _unauthorizedListener;
+}
 
 /**
  * Global 401 / UNAUTHORIZED handler:
- * Clears session token, cached user info, offline-queue pause state, and redirects to /login.
- * Excludes login / activation endpoints.
+ * Clears session token, cached user info, offline-queue pause state, calls registered signOut listener,
+ * and redirects to /login.
+ * Excludes login / activation endpoints. Do not trigger when there is no session.
  */
 export async function handleGlobalUnauthorized(endpointUrlOrPath?: string): Promise<void> {
   if (endpointUrlOrPath) {
@@ -110,6 +123,14 @@ export async function handleGlobalUnauthorized(endpointUrlOrPath?: string): Prom
       lower.includes("/login") ||
       lower.includes("auth.activate");
     if (isLoginEndpoint) return;
+  }
+
+  // Do not trigger when there is no session
+  const token = await getSessionToken();
+  const userInfo = await getUserInfo();
+  const listenerHasSession = _hasSessionFn ? _hasSessionFn() : true;
+  if (!listenerHasSession || (!token && !userInfo)) {
+    return;
   }
 
   if (_isHandlingUnauthorized) return;
@@ -124,6 +145,14 @@ export async function handleGlobalUnauthorized(endpointUrlOrPath?: string): Prom
       resumeQueue();
     } catch {
       // ignore
+    }
+
+    if (_unauthorizedListener) {
+      try {
+        _unauthorizedListener();
+      } catch (err) {
+        console.warn("[Auth] Unauthorized listener error:", err);
+      }
     }
 
     try {

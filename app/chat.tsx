@@ -19,26 +19,42 @@ export default function ChatScreen() {
   const actorRole = data.session?.role;
   const isEmployee = actorRole === "employee";
 
+  const adminQuery = trpc.chat.getFirstActiveAdmin.useQuery(undefined, {
+    enabled: isEmployee && !data.session?.managerId,
+  });
+
   // Resolve real counterpart:
-  // - Employee: assigned manager ID (fallback 1)
+  // - Employee: assigned manager ID, falling back to first active admin returned by server
   // - Manager/Admin: selected employee ID from params
   const counterpartUserId = useMemo(() => {
     if (params.targetUserId) {
       const p = parseInt(params.targetUserId, 10);
       if (!isNaN(p) && p > 0) return p;
     }
-    if (isEmployee && data.session?.managerId) {
-      const m = parseInt(data.session.managerId, 10);
-      if (!isNaN(m) && m > 0) return m;
+    if (isEmployee) {
+      if (data.session?.managerId) {
+        const m = parseInt(String(data.session.managerId), 10);
+        if (!isNaN(m) && m > 0) return m;
+      }
+      if (adminQuery.data?.id) {
+        return adminQuery.data.id;
+      }
+      const fallbackAdmin = data.managedUsers?.find(
+        (u) => u.role === "admin" && u.status === "active"
+      );
+      if (fallbackAdmin && !isNaN(Number(fallbackAdmin.id))) {
+        return Number(fallbackAdmin.id);
+      }
     }
-    return 1;
-  }, [params.targetUserId, isEmployee, data.session?.managerId]);
+    return undefined;
+  }, [params.targetUserId, isEmployee, data.session?.managerId, adminQuery.data?.id, data.managedUsers]);
 
   // Resolve or create channel on backend
   const getChannelMutation = trpc.chat.getOrCreateChannel.useMutation();
   const sendMessageMutation = trpc.chat.sendMessage.useMutation();
 
   useEffect(() => {
+    if (!counterpartUserId) return;
     getChannelMutation
       .mutateAsync({ targetUserId: counterpartUserId })
       .then((ch) => {
@@ -81,7 +97,7 @@ export default function ChatScreen() {
 
     setMessage("");
     // Optimistic UI update
-    sendMessage(text);
+    sendMessage(text, { targetUserId: counterpartUserId, channelId: channelId || undefined, skipNetworkSend: true });
 
     if (channelId) {
       try {
@@ -89,14 +105,18 @@ export default function ChatScreen() {
         await messagesQuery.refetch();
       } catch (err) {
         console.warn("[Chat] Message send failed, queued offline:", err);
-        await enqueueOperation("CHAT_MESSAGE", { channelId, text }, "high");
+        await enqueueOperation("CHAT_MESSAGE", { channelId, targetUserId: counterpartUserId, message: text }, "high");
       }
-    } else {
-      await enqueueOperation("CHAT_MESSAGE", { text }, "normal");
+    } else if (counterpartUserId) {
+      await enqueueOperation("CHAT_MESSAGE", { targetUserId: counterpartUserId, message: text }, "high");
     }
   };
 
-  const headerTitle = isEmployee ? "Field Manager" : `Team Member #${counterpartUserId}`;
+  const headerTitle = isEmployee
+    ? "Field Manager"
+    : counterpartUserId
+    ? `Team Member #${counterpartUserId}`
+    : "Chat";
 
   return (
     <ScreenContainer edges={["top", "bottom", "left", "right"]} containerClassName="bg-background" className="flex-1">

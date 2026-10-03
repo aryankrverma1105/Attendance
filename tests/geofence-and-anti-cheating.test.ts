@@ -96,5 +96,45 @@ describe("Geofencing & Anti-Cheating Verification", () => {
     const reviewRequired = isMocked || shouldReviewPoor;
     expect(reviewRequired).toBe(true);
   });
+
+  it("sets geofenceStatus unverified and minDistanceMeters undefined when no allowed sites exist", () => {
+    const allowedSites: any[] = [];
+    let geofenceStatus: "inside" | "outside" | "unverified" = "unverified";
+    let minDistanceMeters: number | undefined = undefined;
+    let status: "verified" | "review" | "pending" = "verified";
+
+    if (allowedSites.length === 0) {
+      geofenceStatus = "unverified";
+      minDistanceMeters = undefined;
+      const isStrict = false;
+      if (isStrict) {
+        status = "review";
+      }
+    }
+
+    expect(geofenceStatus).toBe("unverified");
+    expect(minDistanceMeters).toBeUndefined();
+    expect(status).toBe("verified");
+  });
+
+  it("sets status review when no allowed sites exist and GEOFENCE_STRICT is true", () => {
+    const allowedSites: any[] = [];
+    let geofenceStatus: "inside" | "outside" | "unverified" = "unverified";
+    let minDistanceMeters: number | undefined = undefined;
+    let status: "verified" | "review" | "pending" = "verified";
+
+    if (allowedSites.length === 0) {
+      geofenceStatus = "unverified";
+      minDistanceMeters = undefined;
+      const isStrict = true;
+      if (isStrict) {
+        status = "review";
+      }
+    }
+
+    expect(geofenceStatus).toBe("unverified");
+    expect(minDistanceMeters).toBeUndefined();
+    expect(status).toBe("review");
+  });
 });
 

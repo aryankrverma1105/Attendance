@@ -38,6 +38,8 @@ import {
   DbSite,
 } from "../drizzle/schema";
 import { ENV } from "./_core/env";
+import { TRPCError } from "@trpc/server";
+import crypto from "crypto";
 
 import mysql from "mysql2";
 
@@ -102,7 +104,7 @@ export async function pingDb(): Promise<boolean> {
 
 export async function upsertUser(user: InsertUser): Promise<void> {
   if (!user.openId) {
-    throw new Error("User openId is required for upsert");
+    throw new TRPCError({ code: "BAD_REQUEST", message: "User openId is required for upsert" });
   }
 
   const db = await getDb();
@@ -305,7 +307,7 @@ export async function seedSuperAdmin(): Promise<void> {
 export async function autoActivateUser(firebaseUid: string, phoneE164: string, name: string) {
   const db = await getDb();
   if (!db) {
-    throw new Error("Database unavailable");
+    throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
   }
 
   let cleanPhone = phoneE164.trim();
@@ -324,7 +326,7 @@ export async function autoActivateUser(firebaseUid: string, phoneE164: string, n
     if (existingByUid.length > 0) {
       const u = existingByUid[0];
       if (u.accountStatus === "suspended" || u.accountStatus === "removed") {
-        throw new Error("Account has been suspended or removed. Please contact your administrator.");
+        throw new TRPCError({ code: "FORBIDDEN", message: "Account has been suspended or removed. Please contact your administrator." });
       }
       return u;
     }
@@ -334,7 +336,7 @@ export async function autoActivateUser(firebaseUid: string, phoneE164: string, n
     if (existingByPhone.length > 0) {
       const u = existingByPhone[0];
       if (u.accountStatus === "suspended" || u.accountStatus === "removed") {
-        throw new Error("Account has been suspended or removed. Please contact your administrator.");
+        throw new TRPCError({ code: "FORBIDDEN", message: "Account has been suspended or removed. Please contact your administrator." });
       }
       await tx
         .update(users)
@@ -383,7 +385,7 @@ export async function autoActivateUser(firebaseUid: string, phoneE164: string, n
     }
 
     // Strictly do NOT create arbitrary users or make the first user admin!
-    throw new Error("No pre-created account or pending invitation found for this phone number. Please contact an administrator.");
+    throw new TRPCError({ code: "NOT_FOUND", message: "No pre-created account or pending invitation found for this phone number. Please contact an administrator." });
   });
 }
 
@@ -406,6 +408,84 @@ export async function getUsersByManagerId(managerId: number): Promise<User[]> {
   return await db.select().from(users).where(eq(users.managerId, managerId));
 }
 
+export async function getFirstActiveAdmin(): Promise<{ id: number; name: string | null } | null> {
+  const db = await getDb();
+  if (!db) return null;
+  const [admin] = await db
+    .select({ id: users.id, name: users.name })
+    .from(users)
+    .where(and(eq(users.role, "admin"), eq(users.accountStatus, "active")))
+    .orderBy(users.id)
+    .limit(1);
+  return admin || null;
+}
+
+export async function listSites(): Promise<DbSite[]> {
+  const db = await getDb();
+  if (!db) return [];
+  return await db.select().from(sites);
+}
+
+export async function createSite(input: {
+  name: string;
+  lat: number;
+  lng: number;
+  geofenceRadiusM?: number;
+}): Promise<DbSite> {
+  const db = await getDb();
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+  const id = crypto.randomUUID();
+  const radius = input.geofenceRadiusM || 100;
+  await db.insert(sites).values({
+    id,
+    name: input.name,
+    lat: input.lat,
+    lng: input.lng,
+    geofenceRadiusM: radius,
+  });
+  const [created] = await db.select().from(sites).where(eq(sites.id, id)).limit(1);
+  return created;
+}
+
+export async function updateSite(
+  id: string,
+  input: {
+    name?: string;
+    lat?: number;
+    lng?: number;
+    geofenceRadiusM?: number;
+  }
+): Promise<DbSite> {
+  const db = await getDb();
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+  const [existing] = await db.select().from(sites).where(eq(sites.id, id)).limit(1);
+  if (!existing) {
+    throw new TRPCError({ code: "NOT_FOUND", message: "Site not found" });
+  }
+  await db
+    .update(sites)
+    .set({
+      ...(input.name !== undefined ? { name: input.name } : {}),
+      ...(input.lat !== undefined ? { lat: input.lat } : {}),
+      ...(input.lng !== undefined ? { lng: input.lng } : {}),
+      ...(input.geofenceRadiusM !== undefined ? { geofenceRadiusM: input.geofenceRadiusM } : {}),
+    })
+    .where(eq(sites.id, id));
+  const [updated] = await db.select().from(sites).where(eq(sites.id, id)).limit(1);
+  return updated;
+}
+
+export async function deleteSite(id: string): Promise<boolean> {
+  const db = await getDb();
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+  const [existing] = await db.select().from(sites).where(eq(sites.id, id)).limit(1);
+  if (!existing) {
+    throw new TRPCError({ code: "NOT_FOUND", message: "Site not found" });
+  }
+  await db.delete(sites).where(eq(sites.id, id));
+  return true;
+}
+
 /**
  * Updates an employee's daily wage with server-side RBAC validation,
  * recording an immutable history record and audit log.
@@ -418,22 +498,22 @@ export async function updateUserDailyWage(
   newDailyWage: number
 ): Promise<{ success: boolean; updatedWage: number; message?: string }> {
   if (newDailyWage < 0 || newDailyWage > 100000) {
-    throw new Error("Invalid daily wage amount. Must be between 0 and 100,000 INR.");
+    throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid daily wage amount. Must be between 0 and 100,000 INR." });
   }
 
   const db = await getDb();
   if (!db) {
-    throw new Error("Database unavailable");
+    throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
   }
 
   const targetUser = await getUserById(targetUserId);
   if (!targetUser) {
-    throw new Error("Target employee not found");
+    throw new TRPCError({ code: "NOT_FOUND", message: "Target employee not found" });
   }
 
   // RBAC validation: STRICT RULE: Only Admin can modify employee daily wages.
   if (actorRole !== "admin") {
-    throw new Error("Forbidden: Only Administrators are authorized to set or modify employee daily wages.");
+    throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Only Administrators are authorized to set or modify employee daily wages." });
   }
 
   return await db.transaction(async (tx) => {
@@ -601,7 +681,7 @@ export async function createUserByAdmin(
   }
 ): Promise<{ success: boolean; user: User }> {
   if (actorUser.role !== "admin") {
-    throw new Error("Forbidden: Only Administrators are authorized to create new accounts.");
+    throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Only Administrators are authorized to create new accounts." });
   }
 
   // Validate phone format
@@ -614,13 +694,13 @@ export async function createUserByAdmin(
 
   const db = await getDb();
   if (!db) {
-    throw new Error("Database is currently unavailable.");
+    throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database is currently unavailable." });
   }
 
   // Check for duplicate phone number
   const existing = await db.select().from(users).where(eq(users.phoneE164, cleanPhone)).limit(1);
   if (existing.length > 0) {
-    throw new Error(`An account with phone number ${cleanPhone} already exists.`);
+    throw new TRPCError({ code: "CONFLICT", message: `An account with phone number ${cleanPhone} already exists.` });
   }
 
   return await db.transaction(async (tx) => {
@@ -685,12 +765,12 @@ export async function createTask(
   }
 ): Promise<DbTask> {
   if (actorUser.role !== "admin" && actorUser.role !== "manager") {
-    throw new Error("Forbidden: Only Administrators and Managers can assign tasks.");
+    throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Only Administrators and Managers can assign tasks." });
   }
 
   const db = await getDb();
   if (!db) {
-    throw new Error("Database unavailable.");
+    throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable." });
   }
 
   if (input.operationId) {
@@ -702,15 +782,15 @@ export async function createTask(
 
   const targetUser = await getUserById(input.assignedToUserId);
   if (!targetUser) {
-    throw new Error("Assigned employee not found.");
+    throw new TRPCError({ code: "NOT_FOUND", message: "Assigned employee not found." });
   }
   if (targetUser.role !== "employee") {
-    throw new Error("Tasks can only be assigned to field employees.");
+    throw new TRPCError({ code: "BAD_REQUEST", message: "Tasks can only be assigned to field employees." });
   }
 
   // Manager scoping check: Manager can only assign tasks to their assigned team
   if (actorUser.role === "manager" && targetUser.managerId !== actorUser.id) {
-    throw new Error("Forbidden: Managers can only assign tasks to employees in their own team.");
+    throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Managers can only assign tasks to employees in their own team." });
   }
 
   const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -777,21 +857,21 @@ export async function updateTaskStatus(
   newStatus: "PENDING" | "IN_PROGRESS" | "COMPLETED"
 ): Promise<DbTask> {
   const db = await getDb();
-  if (!db) throw new Error("Database unavailable.");
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable." });
 
   const existing = await db.select().from(tasks).where(eq(tasks.id, taskId)).limit(1);
-  if (existing.length === 0) throw new Error("Task not found.");
+  if (existing.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Task not found." });
 
   const task = existing[0];
   // Check permission:
   if (actorUser.role === "employee") {
     if (task.assignedToUserId !== actorUser.id) {
-      throw new Error("Forbidden: You can only update tasks assigned to yourself.");
+      throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: You can only update tasks assigned to yourself." });
     }
   } else if (actorUser.role === "manager") {
     const targetUser = await getUserById(task.assignedToUserId);
     if (targetUser?.managerId !== actorUser.id && task.assignedByUserId !== actorUser.id) {
-      throw new Error("Forbidden: Managers can only update tasks for their assigned team.");
+      throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Managers can only update tasks for their assigned team." });
     }
   }
 
@@ -823,7 +903,7 @@ export async function recordGpsPoint(
   }
 ): Promise<DbGpsPoint> {
   const db = await getDb();
-  if (!db) throw new Error("Database unavailable.");
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable." });
 
   if (point.operationId) {
     const existingOp = await db
@@ -868,19 +948,19 @@ export async function getDayGpsHistory(
   points: DbGpsPoint[];
 }> {
   const targetUser = await getUserById(targetUserId);
-  if (!targetUser) throw new Error("Target user not found.");
+  if (!targetUser) throw new TRPCError({ code: "NOT_FOUND", message: "Target user not found." });
 
   // RBAC Authorization check
   if (actorUser.role === "admin") {
     // Admin can view any user
   } else if (actorUser.role === "manager") {
     if (targetUser.managerId !== actorUser.id && targetUser.id !== actorUser.id) {
-      throw new Error("Forbidden: Managers can only view GPS history for employees in their own team.");
+      throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Managers can only view GPS history for employees in their own team." });
     }
   } else {
     // Employee can only view own history
     if (actorUser.id !== targetUserId) {
-      throw new Error("Forbidden: Employees can only view their own GPS history.");
+      throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Employees can only view their own GPS history." });
     }
   }
 
@@ -924,14 +1004,14 @@ export async function updateUserStatusByAdmin(
   }
 ): Promise<{ success: boolean; user?: User }> {
   if (actorUser.role !== "admin") {
-    throw new Error("Forbidden: Only Administrators can update user status and roles.");
+    throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Only Administrators can update user status and roles." });
   }
 
   const db = await getDb();
-  if (!db) throw new Error("Database unavailable.");
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable." });
 
   const targetUser = await getUserById(input.targetUserId);
-  if (!targetUser) throw new Error("Target user not found.");
+  if (!targetUser) throw new TRPCError({ code: "NOT_FOUND", message: "Target user not found." });
 
   const updates: Partial<User> = { updatedAt: new Date() };
   if (input.accountStatus) updates.accountStatus = input.accountStatus;
@@ -988,11 +1068,11 @@ function validateClientTimestamp(tsStr?: string): Date | undefined {
   const diffMs = now - d.getTime();
   // Reject if more than 24h old
   if (diffMs > 24 * 60 * 60 * 1000) {
-    throw new Error("Client timestamp is more than 24 hours old and cannot be accepted.");
+    throw new TRPCError({ code: "BAD_REQUEST", message: "Client timestamp is more than 24 hours old and cannot be accepted." });
   }
   // Reject if in the future (>5 minutes tolerance for minor clock skew)
   if (diffMs < -5 * 60 * 1000) {
-    throw new Error("Client timestamp is in the future and cannot be accepted.");
+    throw new TRPCError({ code: "BAD_REQUEST", message: "Client timestamp is in the future and cannot be accepted." });
   }
   return d;
 }
@@ -1016,11 +1096,11 @@ export async function recordAttendanceCheckIn(
   }
 ): Promise<any> {
   if (employeeUser.role !== "employee") {
-    throw new Error("Forbidden: Attendance check-in is restricted exclusively to field employees.");
+    throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Attendance check-in is restricted exclusively to field employees." });
   }
 
   const db = await getDb();
-  if (!db) throw new Error("Database unavailable.");
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable." });
 
   // 1. Idempotency Check: if operationId provided and matches existing, return existing record
   if (input.operationId) {
@@ -1055,7 +1135,7 @@ export async function recordAttendanceCheckIn(
 
   const id = `att-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const MAX_GPS_ACCURACY_METERS = Number(process.env.MAX_GPS_ACCURACY_METERS) || 100;
-  const DEFAULT_GEOFENCE_RADIUS_METERS = Number(process.env.DEFAULT_GEOFENCE_RADIUS_METERS) || 300;
+  const DEFAULT_GEOFENCE_RADIUS_METERS = Number(process.env.DEFAULT_GEOFENCE_RADIUS_METERS) || 100;
 
   let isMockedFlag = input.isMocked ? 1 : 0;
   let status: "verified" | "review" | "pending" = "verified";
@@ -1174,9 +1254,13 @@ export async function recordAttendanceCheckIn(
           status = "review"; // Flag for review when outside authorized geofence
         }
       } else {
-        // Fallback when no sites configured
-        geofenceStatus = "inside";
-        minDistanceMeters = 0;
+        // When no allowed sites exist, set geofenceStatus "unverified" (not "inside") and minDistanceMeters undefined.
+        // If env GEOFENCE_STRICT=true also set status "review".
+        geofenceStatus = "unverified";
+        minDistanceMeters = undefined;
+        if (process.env.GEOFENCE_STRICT === "true") {
+          status = "review";
+        }
       }
     }
   }
@@ -1209,11 +1293,11 @@ export async function recordAttendanceCheckOut(
   }
 ): Promise<any> {
   if (employeeUser.role !== "employee") {
-    throw new Error("Forbidden: Attendance check-out is restricted exclusively to field employees.");
+    throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Attendance check-out is restricted exclusively to field employees." });
   }
 
   const db = await getDb();
-  if (!db) throw new Error("Database unavailable.");
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable." });
 
   // Idempotency: if operationId provided and matches completed record, return it
   if (input.operationId) {
@@ -1240,7 +1324,7 @@ export async function recordAttendanceCheckOut(
     .limit(1);
 
   if (activeRecords.length === 0 || activeRecords[0].checkOutAt) {
-    throw new Error("No active check-in session found to check out from.");
+    throw new TRPCError({ code: "BAD_REQUEST", message: "No active check-in session found to check out from." });
   }
 
   const targetRecord = activeRecords[0];
@@ -1271,21 +1355,21 @@ export async function reviewAttendanceRecord(
   }
 ): Promise<any> {
   if (actorUser.role !== "admin" && actorUser.role !== "manager") {
-    throw new Error("Forbidden: Only Administrators and Managers can review attendance records.");
+    throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Only Administrators and Managers can review attendance records." });
   }
 
   const db = await getDb();
-  if (!db) throw new Error("Database unavailable.");
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable." });
 
   const records = await db.select().from(attendanceRecords).where(eq(attendanceRecords.id, input.recordId)).limit(1);
-  if (records.length === 0) throw new Error("Attendance record not found.");
+  if (records.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Attendance record not found." });
   const record = records[0];
 
   const targetUser = await getUserById(record.userId);
-  if (!targetUser) throw new Error("Employee not found.");
+  if (!targetUser) throw new TRPCError({ code: "NOT_FOUND", message: "Employee not found." });
 
   if (actorUser.role === "manager" && targetUser.managerId !== actorUser.id) {
-    throw new Error("Forbidden: Managers can only review attendance records for employees in their own team.");
+    throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Managers can only review attendance records for employees in their own team." });
   }
 
   const now = new Date();
@@ -1323,7 +1407,7 @@ export async function getTeamAttendance(
   date?: string // YYYY-MM-DD
 ): Promise<any[]> {
   if (actorUser.role !== "admin" && actorUser.role !== "manager") {
-    throw new Error("Forbidden: Only Administrators and Managers can view team attendance.");
+    throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Only Administrators and Managers can view team attendance." });
   }
 
   const db = await getDb();
@@ -1381,18 +1465,18 @@ export async function getAttendanceRecords(
 
   const targetId = targetUserId ?? actorUser.id;
   const targetUser = await getUserById(targetId);
-  if (!targetUser) throw new Error("Target user not found.");
+  if (!targetUser) throw new TRPCError({ code: "NOT_FOUND", message: "Target user not found." });
 
   // RBAC Authorization check
   if (actorUser.role === "admin") {
     // Admin can view all
   } else if (actorUser.role === "manager") {
     if (targetUser.managerId !== actorUser.id && targetUser.id !== actorUser.id) {
-      throw new Error("Forbidden: Managers can only view attendance for employees in their own team.");
+      throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Managers can only view attendance for employees in their own team." });
     }
   } else {
     if (actorUser.id !== targetId) {
-      throw new Error("Forbidden: Employees can only view their own attendance records.");
+      throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Employees can only view their own attendance records." });
     }
   }
 
@@ -1420,7 +1504,7 @@ export async function createCustomer(
   }
 ): Promise<DbCustomer> {
   const db = await getDb();
-  if (!db) throw new Error("Database unavailable.");
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable." });
 
   if (input.operationId) {
     const existingOp = await db.select().from(customers).where(eq(customers.operationId, input.operationId)).limit(1);
@@ -1461,14 +1545,14 @@ export async function updateCustomer(
   }>
 ): Promise<DbCustomer> {
   const db = await getDb();
-  if (!db) throw new Error("Database unavailable.");
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable." });
 
   const existing = await db.select().from(customers).where(eq(customers.id, customerId)).limit(1);
-  if (existing.length === 0) throw new Error("Customer not found.");
+  if (existing.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Customer not found." });
 
   // Ownership check: creator, manager, or admin
   if (actorUser.role === "employee" && existing[0].createdByUserId !== actorUser.id) {
-    throw new Error("Forbidden: You can only update customers that you created.");
+    throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: You can only update customers that you created." });
   }
 
   await db.update(customers).set(input).where(eq(customers.id, customerId));
@@ -1501,7 +1585,7 @@ export async function createVisit(
   }
 ): Promise<DbVisit> {
   const db = await getDb();
-  if (!db) throw new Error("Database unavailable.");
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable." });
 
   if (input.operationId) {
     const existingOp = await db.select().from(visits).where(eq(visits.operationId, input.operationId)).limit(1);
@@ -1512,12 +1596,12 @@ export async function createVisit(
 
   // RBAC validation:
   if (actorUser.role === "employee" && assignedEmployeeId !== actorUser.id) {
-    throw new Error("Forbidden: Field employees can only schedule visits for themselves.");
+    throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Field employees can only schedule visits for themselves." });
   }
   if (actorUser.role === "manager") {
     const targetUser = await getUserById(assignedEmployeeId);
     if (targetUser?.managerId !== actorUser.id && assignedEmployeeId !== actorUser.id) {
-      throw new Error("Forbidden: Managers can only schedule visits for members of their team.");
+      throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Managers can only schedule visits for members of their team." });
     }
   }
 
@@ -1545,14 +1629,14 @@ export async function checkInVisit(
   }
 ): Promise<DbVisit> {
   const db = await getDb();
-  if (!db) throw new Error("Database unavailable.");
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable." });
 
   const existing = await db.select().from(visits).where(eq(visits.id, visitId)).limit(1);
-  if (existing.length === 0) throw new Error("Visit not found.");
+  if (existing.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Visit not found." });
 
   const visit = existing[0];
   if (actorUser.role === "employee" && visit.employeeUserId !== actorUser.id) {
-    throw new Error("Forbidden: You can only check in to your own assigned visits.");
+    throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: You can only check in to your own assigned visits." });
   }
 
   const now = new Date();
@@ -1582,14 +1666,14 @@ export async function completeVisit(
   }
 ): Promise<DbVisit> {
   const db = await getDb();
-  if (!db) throw new Error("Database unavailable.");
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable." });
 
   const existing = await db.select().from(visits).where(eq(visits.id, visitId)).limit(1);
-  if (existing.length === 0) throw new Error("Visit not found.");
+  if (existing.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Visit not found." });
 
   const visit = existing[0];
   if (actorUser.role === "employee" && visit.employeeUserId !== actorUser.id) {
-    throw new Error("Forbidden: You can only complete your own assigned visits.");
+    throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: You can only complete your own assigned visits." });
   }
 
   const now = new Date();
@@ -1620,14 +1704,14 @@ export async function updateVisitNotes(
   }
 ): Promise<DbVisit> {
   const db = await getDb();
-  if (!db) throw new Error("Database unavailable.");
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable." });
 
   const existing = await db.select().from(visits).where(eq(visits.id, visitId)).limit(1);
-  if (existing.length === 0) throw new Error("Visit not found.");
+  if (existing.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Visit not found." });
 
   const visit = existing[0];
   if (actorUser.role === "employee" && visit.employeeUserId !== actorUser.id) {
-    throw new Error("Forbidden: You can only update notes for your own assigned visits.");
+    throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: You can only update notes for your own assigned visits." });
   }
 
   const updates: Partial<InsertDbVisit> = {};
@@ -1653,19 +1737,19 @@ export async function addVisitEvidence(
   }
 ): Promise<DbVisitEvidence> {
   const db = await getDb();
-  if (!db) throw new Error("Database unavailable.");
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable." });
 
   const existingVisit = await db.select().from(visits).where(eq(visits.id, visitId)).limit(1);
-  if (existingVisit.length === 0) throw new Error("Visit not found.");
+  if (existingVisit.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Visit not found." });
   const visit = existingVisit[0];
 
   // Ownership check: owner, their manager, or admin
   if (actorUser.role === "employee" && visit.employeeUserId !== actorUser.id) {
-    throw new Error("Forbidden: Employees can only add evidence to their own visits.");
+    throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Employees can only add evidence to their own visits." });
   } else if (actorUser.role === "manager") {
     const owner = await getUserById(visit.employeeUserId);
     if (owner?.managerId !== actorUser.id && visit.employeeUserId !== actorUser.id) {
-      throw new Error("Forbidden: Managers can only add evidence to visits for their assigned team.");
+      throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Managers can only add evidence to visits for their assigned team." });
     }
   }
 
@@ -1734,11 +1818,11 @@ export async function getVisitDetail(
 
   // Ownership check: owner, their manager, or admin
   if (actorUser.role === "employee" && visit.employeeUserId !== actorUser.id) {
-    throw new Error("Forbidden: Employees can only view their own visits.");
+    throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Employees can only view their own visits." });
   } else if (actorUser.role === "manager") {
     const owner = await getUserById(visit.employeeUserId);
     if (owner?.managerId !== actorUser.id && visit.employeeUserId !== actorUser.id) {
-      throw new Error("Forbidden: Managers can only view visits for their assigned team.");
+      throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Managers can only view visits for their assigned team." });
     }
   }
 
@@ -1760,19 +1844,19 @@ export async function getOrCreateDirectChannel(
   targetUserId: number
 ): Promise<DbChatChannel> {
   const db = await getDb();
-  if (!db) throw new Error("Database unavailable.");
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable." });
 
   const targetUser = await getUserById(targetUserId);
-  if (!targetUser) throw new Error("Target user not found.");
+  if (!targetUser) throw new TRPCError({ code: "NOT_FOUND", message: "Target user not found." });
 
   // Ownership check: only between employee and their assigned manager or admin
   if (actorUser.role === "employee") {
     if (targetUser.role !== "admin" && actorUser.managerId !== targetUserId) {
-      throw new Error("Forbidden: Employees can only chat with their assigned manager or an administrator.");
+      throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Employees can only chat with their assigned manager or an administrator." });
     }
   } else if (actorUser.role === "manager") {
     if (targetUser.role !== "admin" && targetUser.managerId !== actorUser.id) {
-      throw new Error("Forbidden: Managers can only chat with their assigned team members or administrators.");
+      throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Managers can only chat with their assigned team members or administrators." });
     }
   }
 
@@ -1811,7 +1895,7 @@ export async function sendChatMessage(
   operationId?: string
 ): Promise<DbChatMessage> {
   const db = await getDb();
-  if (!db) throw new Error("Database unavailable.");
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable." });
 
   if (operationId) {
     const existingOp = await db.select().from(chatMessages).where(eq(chatMessages.operationId, operationId)).limit(1);
@@ -1819,12 +1903,12 @@ export async function sendChatMessage(
   }
 
   const channels = await db.select().from(chatChannels).where(eq(chatChannels.id, channelId)).limit(1);
-  if (channels.length === 0) throw new Error("Chat channel not found.");
+  if (channels.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Chat channel not found." });
   const chan = channels[0];
 
   // Channel membership check
   if (actorUser.role !== "admin" && chan.managerUserId !== actorUser.id && chan.employeeUserId !== actorUser.id) {
-    throw new Error("Forbidden: You are not a member of this chat channel.");
+    throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: You are not a member of this chat channel." });
   }
 
   const msgId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -1855,7 +1939,7 @@ export async function getChannelMessages(
 
   // Channel membership check
   if (actorUser.role !== "admin" && chan.managerUserId !== actorUser.id && chan.employeeUserId !== actorUser.id) {
-    throw new Error("Forbidden: You are not a member of this chat channel.");
+    throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: You are not a member of this chat channel." });
   }
 
   return await db
@@ -1881,7 +1965,7 @@ export async function createExpense(
   }
 ): Promise<DbExpense> {
   const db = await getDb();
-  if (!db) throw new Error("Database unavailable.");
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable." });
 
   if (input.operationId) {
     const existingOp = await db.select().from(expenses).where(eq(expenses.operationId, input.operationId)).limit(1);
@@ -1943,26 +2027,26 @@ export async function reviewExpense(
   decision: "APPROVED" | "REJECTED"
 ): Promise<DbExpense> {
   if (actorUser.role !== "admin" && actorUser.role !== "manager") {
-    throw new Error("Forbidden: Only Administrators and Managers can approve or reject expenses.");
+    throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Only Administrators and Managers can approve or reject expenses." });
   }
 
   const db = await getDb();
-  if (!db) throw new Error("Database unavailable.");
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable." });
 
   const expList = await db.select().from(expenses).where(eq(expenses.id, expenseId)).limit(1);
-  if (expList.length === 0) throw new Error("Expense not found.");
+  if (expList.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Expense not found." });
   const exp = expList[0];
 
   // Never self-approval
   if (exp.employeeUserId === actorUser.id) {
-    throw new Error("Forbidden: Self-approval of expenses is prohibited.");
+    throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Self-approval of expenses is prohibited." });
   }
 
   // Managers can only review for their team
   if (actorUser.role === "manager") {
     const owner = await getUserById(exp.employeeUserId);
     if (owner?.managerId !== actorUser.id) {
-      throw new Error("Forbidden: Managers can only review expenses for their own team.");
+      throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Managers can only review expenses for their own team." });
     }
   }
 
@@ -1991,7 +2075,7 @@ export async function registerDeviceSession(
   }
 ): Promise<DbDeviceSession> {
   const db = await getDb();
-  if (!db) throw new Error("Database unavailable.");
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable." });
 
   const sessionId = `dev-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   await db.insert(deviceSessions).values({
@@ -2017,7 +2101,7 @@ export async function createNotification(
   }
 ): Promise<DbNotification> {
   const db = await getDb();
-  if (!db) throw new Error("Database unavailable.");
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable." });
 
   const notifId = `notif-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   await db.insert(notifications).values({
@@ -2050,7 +2134,7 @@ export async function getUserNotifications(userId: number): Promise<DbNotificati
  */
 export async function getAuditLogs(actorUser: User): Promise<any[]> {
   if (actorUser.role !== "admin") {
-    throw new Error("Forbidden: Only Administrators can access audit logs.");
+    throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Only Administrators can access audit logs." });
   }
 
   const db = await getDb();

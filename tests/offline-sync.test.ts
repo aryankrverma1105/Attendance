@@ -255,7 +255,7 @@ describe("Offline Synchronization Engine", () => {
     expect(updatedWorkspace.tasks[0].syncState).toBe("synced");
   });
 
-  it("throws typed SyncOperationError and dead-letters CHAT_MESSAGE when channelId is missing", async () => {
+  it("throws typed SyncOperationError and dead-letters CHAT_MESSAGE when channelId and targetUserId are both missing", async () => {
     const chatOp = await enqueueOperation("CHAT_MESSAGE", { message: "orphan message" });
     await expect(dispatchQueuedOperation(chatOp)).rejects.toThrow(SyncOperationError);
 
@@ -265,6 +265,44 @@ describe("Offline Synchronization Engine", () => {
     const queue = await getOfflineQueue();
     expect(queue[0].status).toBe("dead_letter");
     expect(queue[0].error).toContain("BAD_REQUEST");
+  });
+
+  it("offline chat message with only targetUserId syncs", async () => {
+    const getOrCreateChannelMock = vi.fn(async () => ({ id: "resolved-chan-42" }));
+    const sendMessageMock = vi.fn(async () => ({ id: "msg-999" }));
+    (trpcClient.chat.getOrCreateChannel as any).mutate = getOrCreateChannelMock;
+    (trpcClient.chat.sendMessage as any).mutate = sendMessageMock;
+
+    const chatOp = await enqueueOperation("CHAT_MESSAGE", {
+      targetUserId: 42,
+      message: "Hello manager via offline queue",
+    });
+
+    const success = await dispatchQueuedOperation(chatOp);
+    expect(success).toBe(true);
+    expect(getOrCreateChannelMock).toHaveBeenCalledWith({ targetUserId: 42 });
+    expect(sendMessageMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channelId: "resolved-chan-42",
+        message: "Hello manager via offline queue",
+      })
+    );
+  });
+
+  it("a NOT_FOUND mutation is dead-lettered on attempt 1", async () => {
+    await enqueueOperation("TASK_UPDATE", { taskId: "non-existent-task", status: "COMPLETED" });
+
+    const notFoundHandler = vi.fn(async () => {
+      throw new SyncOperationError("Task not found", { status: 404, code: "NOT_FOUND" });
+    });
+
+    const flushResult = await flushOfflineQueue(notFoundHandler);
+    expect(flushResult.failed).toBe(1);
+
+    const queue = await getOfflineQueue();
+    expect(queue[0].status).toBe("dead_letter");
+    expect(queue[0].attemptCount).toBe(0);
+    expect(queue[0].error).toContain("NOT_FOUND");
   });
 
   it("handles UPLOAD_SELFIE -> VISIT_EVIDENCE calling visits.addEvidence with evidenceUrl", async () => {

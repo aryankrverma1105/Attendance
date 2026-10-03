@@ -278,9 +278,9 @@ Example:
 npx tsx scripts/set-password.ts +919835916278 "MyStrongAdminPassword123!"
 ```
 
-This utility:
-1. Formats the phone to E.164 and queries the MySQL `users` table.
-2. Hashes the password using `bcrypt` (10 salt rounds).
-3. Stores `passwordHash` and automatically increments `tokenVersion` (invalidating any old sessions).
-4. Enables immediate password login at `/api/auth/password-login` or in the mobile/web app sign-in screen.
+### 15. Drizzle Migration Snapshot Chain & Database Deployment
+- **Separation of Scripts**: `npm run db:push` executes `drizzle-kit migrate` only. Schema diff generation is decoupled into `npm run db:generate` (`drizzle-kit generate`).
+- **Snapshot Alignment (0006)**: Handwritten migrations `0004` and `0005` created discrepancies in legacy snapshots. Migration `0006_equal_zuras.sql` contains a safe no-op statement (`SELECT 1;`) with an updated `meta/0006_snapshot.json` and journal entry, reconciling the active TypeScript schema in `drizzle/schema.ts` with drizzle-kit's snapshot chain.
+- Subsequent runs of `npm run db:generate` report zero unapplied schema changes.
+- `drizzle-kit migrate` safely applies on fresh databases as well as databases that already have migrations `0000` through `0005` applied.
 

@@ -21,12 +21,12 @@ export function canRemoveManagedAccount(input: {
   if (!canAdminManageAccount(input.role) || !input.actorId) return false;
   if (input.actorId === input.targetUserId) return false;
 
-  // Primary Super Admin (9835916278) can never be removed or deleted by anyone
+  // Primary Super Admin () can never be removed or deleted by anyone
   if (isSuperAdmin(input.targetUserIdentifier)) {
     return false;
   }
 
-  // If the target is an Administrator, ONLY the primary Super Admin (9835916278) can remove them
+  // If the target is an Administrator, ONLY the primary Super Admin () can remove them
   if (input.targetUserRole === "admin") {
     return isSuperAdmin(input.actorIdentifier);
   }

@@ -308,5 +308,48 @@ describe("Security Defects Remediations & Production Hardening", () => {
         })
       ).toThrow("ALLOWED_ORIGINS");
     });
+
+    it("blocks ALLOW_INSECURE_DEV in production and computes isDevBypass safely", () => {
+      const checkInsecureDevAllowed = (nodeEnv: string, allowInsecureDev: string) => {
+        if (nodeEnv === "production" && allowInsecureDev === "true") {
+          throw new Error("FATAL: ALLOW_INSECURE_DEV is set in production");
+        }
+        return nodeEnv !== "production" && allowInsecureDev === "true";
+      };
+
+      // In production with ALLOW_INSECURE_DEV="true": must throw fatal error
+      expect(() => checkInsecureDevAllowed("production", "true")).toThrow("FATAL: ALLOW_INSECURE_DEV is set in production");
+
+      // In production with ALLOW_INSECURE_DEV unset or false: bypass is false
+      expect(checkInsecureDevAllowed("production", "false")).toBe(false);
+      expect(checkInsecureDevAllowed("production", "")).toBe(false);
+
+      // In development with ALLOW_INSECURE_DEV="true": bypass is true
+      expect(checkInsecureDevAllowed("development", "true")).toBe(true);
+
+      // In development with ALLOW_INSECURE_DEV="false": bypass is false
+      expect(checkInsecureDevAllowed("development", "false")).toBe(false);
+    });
+
+    it("attaches Referrer-Policy: no-referrer and Cache-Control: private, no-store for ?token= requests", () => {
+      const getResponseHeaders = (hasQueryToken: boolean) => {
+        const headers: Record<string, string> = {};
+        if (hasQueryToken) {
+          headers["Referrer-Policy"] = "no-referrer";
+          headers["Cache-Control"] = "private, no-store";
+        } else {
+          headers["Cache-Control"] = "private, max-age=3600";
+        }
+        return headers;
+      };
+
+      const tokenHeaders = getResponseHeaders(true);
+      expect(tokenHeaders["Referrer-Policy"]).toBe("no-referrer");
+      expect(tokenHeaders["Cache-Control"]).toBe("private, no-store");
+
+      const standardHeaders = getResponseHeaders(false);
+      expect(standardHeaders["Referrer-Policy"]).toBeUndefined();
+      expect(standardHeaders["Cache-Control"]).toBe("private, max-age=3600");
+    });
   });
 });

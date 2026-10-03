@@ -19,6 +19,8 @@ export function extractEvidenceOwnerId(filename: string): number | null {
   return isNaN(id) ? null : id;
 }
 
+let hasLoggedTokenInUrlWarning = false;
+
 // Ensure upload directory exists
 export function initSelfieStorage(app: Express) {
   if (!fs.existsSync(UPLOADS_DIR)) {
@@ -28,16 +30,22 @@ export function initSelfieStorage(app: Express) {
   /**
    * Authorized media serving handler.
    * Serves ONLY /uploads/selfies/* (never the whole uploads directory).
-   * Always requires authentication (unless explicit ALLOW_INSECURE_DEV=true).
+   * Always requires authentication (unless explicit ALLOW_INSECURE_DEV=true in non-production).
    */
   app.get("/uploads/selfies/*", async (req: Request, res: Response) => {
     try {
       // Support query token, Bearer auth, or cookie
+      let hasTokenInQuery = false;
       if (req.query.token && typeof req.query.token === "string" && !req.headers.authorization) {
         req.headers.authorization = `Bearer ${req.query.token}`;
+        hasTokenInQuery = true;
+        if (!hasLoggedTokenInUrlWarning) {
+          hasLoggedTokenInUrlWarning = true;
+          console.warn("⚠️  [Security Warning] Accessing evidence via URL '?token=' query parameter exposes authentication tokens in HTTP access logs, browser history, and intermediate proxy logs. Consider passing Authorization headers instead.");
+        }
       }
 
-      const isDevBypass = process.env.ALLOW_INSECURE_DEV === "true";
+      const isDevBypass = process.env.NODE_ENV !== "production" && process.env.ALLOW_INSECURE_DEV === "true";
 
       if (!isDevBypass) {
         const authUser = await sdk.authenticateRequest(req);
@@ -81,7 +89,12 @@ export function initSelfieStorage(app: Express) {
         return res.status(404).json({ error: "Evidence photo not found" });
       }
 
-      res.setHeader("Cache-Control", "private, max-age=3600");
+      if (hasTokenInQuery) {
+        res.setHeader("Referrer-Policy", "no-referrer");
+        res.setHeader("Cache-Control", "private, no-store");
+      } else {
+        res.setHeader("Cache-Control", "private, max-age=3600");
+      }
       return res.sendFile(fullPath);
     } catch (err: any) {
       if (err?.status === 401 || err?.status === 403 || err?.statusCode === 401 || err?.statusCode === 403) {
@@ -96,12 +109,12 @@ export function initSelfieStorage(app: Express) {
   /**
    * REST API endpoint for uploading compressed selfies & visit evidence.
    * Derive employeeId strictly from the authenticated session (not request body).
-   * Always requires authentication (unless ALLOW_INSECURE_DEV=true).
+   * Always requires authentication (unless ALLOW_INSECURE_DEV=true in non-production).
    */
   app.post("/api/upload-selfie", async (req: Request, res: Response) => {
     try {
       let sessionEmployeeId = "emp";
-      const isDevBypass = process.env.ALLOW_INSECURE_DEV === "true";
+      const isDevBypass = process.env.NODE_ENV !== "production" && process.env.ALLOW_INSECURE_DEV === "true";
 
       if (!isDevBypass) {
         const authUser = await sdk.authenticateRequest(req);

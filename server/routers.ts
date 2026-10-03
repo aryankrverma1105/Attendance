@@ -831,6 +831,10 @@ export const appRouter = router({
   }),
 
   chat: router({
+    getFirstActiveAdmin: protectedProcedure.query(async () => {
+      const { getFirstActiveAdmin } = await import("./db");
+      return await getFirstActiveAdmin();
+    }),
     getOrCreateChannel: protectedProcedure
       .input(z.object({ targetUserId: z.number() }))
       .mutation(async ({ ctx, input }) => {
@@ -901,6 +905,59 @@ export const appRouter = router({
       .mutation(async ({ ctx, input }) => {
         const { registerDeviceSession } = await import("./db");
         return await registerDeviceSession(ctx.user.id, input);
+      }),
+  }),
+
+  sites: router({
+    list: protectedProcedure.query(async ({ ctx }) => {
+      if (ctx.user.role !== "admin") {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Only Administrators can manage work sites." });
+      }
+      const { listSites } = await import("./db");
+      return await listSites();
+    }),
+    create: protectedProcedure
+      .input(
+        z.object({
+          name: z.string().min(1),
+          lat: z.number(),
+          lng: z.number(),
+          geofenceRadiusM: z.number().positive().optional(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        if (ctx.user.role !== "admin") {
+          throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Only Administrators can create work sites." });
+        }
+        const { createSite } = await import("./db");
+        return await createSite(input);
+      }),
+    update: protectedProcedure
+      .input(
+        z.object({
+          id: z.string(),
+          name: z.string().min(1).optional(),
+          lat: z.number().optional(),
+          lng: z.number().optional(),
+          geofenceRadiusM: z.number().positive().optional(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        if (ctx.user.role !== "admin") {
+          throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Only Administrators can update work sites." });
+        }
+        const { id, ...data } = input;
+        const { updateSite } = await import("./db");
+        return await updateSite(id, data);
+      }),
+    delete: protectedProcedure
+      .input(z.object({ id: z.string() }))
+      .mutation(async ({ ctx, input }) => {
+        if (ctx.user.role !== "admin") {
+          throw new TRPCError({ code: "FORBIDDEN", message: "Forbidden: Only Administrators can delete work sites." });
+        }
+        const { deleteSite } = await import("./db");
+        return await deleteSite(input.id);
       }),
   }),
 });

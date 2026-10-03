@@ -14,7 +14,7 @@
     "preview": {
       "distribution": "internal",
       "env": {
-        "EXPO_PUBLIC_API_BASE_URL": "https://REPLACE_WITH_API_DOMAIN"
+        "EXPO_PUBLIC_API_BASE_URL": "http://34.180.17.0:3000"
       },
       "android": {
         "buildType": "apk"
@@ -23,7 +23,7 @@
     "production": {
       "autoIncrement": true,
       "env": {
-        "EXPO_PUBLIC_API_BASE_URL": "https://REPLACE_WITH_API_DOMAIN"
+        "EXPO_PUBLIC_API_BASE_URL": "http://34.180.17.0:3000"
       },
       "android": {
         "buildType": "app-bundle"

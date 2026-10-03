@@ -33,10 +33,9 @@ import { canSetEmployeeWage } from "@/lib/field-access";
 import { startManagedRouteTracking, stopManagedRouteTracking, type TrackingStartResult } from "@/lib/tracking-service";
 import { shouldStartTrackingAfterAttendance } from "@/lib/tracking-policy";
 import { shouldEscalateTrackingPermission } from "@/lib/tracking-feedback";
-import { getApiBaseUrl } from "@/constants/oauth";
 import { trpcClient } from "@/lib/trpc";
 import { enqueueOperation, clearOfflineQueue, setOfflineQueueUserId } from "@/lib/offline-sync";
-import { clearUserInfo, removeSessionToken } from "@/lib/_core/auth";
+import { clearUserInfo, removeSessionToken, setUnauthorizedListener } from "@/lib/_core/auth";
 
 export {
   calculateEarnings,
@@ -118,7 +117,7 @@ type FieldDataContextValue = {
   addCustomer: (input: Omit<Customer, "id" | "createdAt">) => string;
   createVisit: (input: Omit<Visit, "id" | "status" | "checkInAt" | "checkOutAt" | "checkInLocation" | "checkOutLocation" | "evidenceUris" | "meetingOutcome" | "notes" | "followUpDate">) => string;
   updateVisit: (visitId: string, input: Pick<Visit, "meetingOutcome" | "notes" | "followUpDate">) => void;
-  sendMessage: (text: string) => void;
+  sendMessage: (text: string, options?: { targetUserId?: number; channelId?: string; skipNetworkSend?: boolean }) => void;
   addRoutePoint: (point: LocationEvidence) => void;
   startRouteTracking: () => Promise<TrackingStartResult>;
   stopRouteTracking: () => Promise<void>;
@@ -687,6 +686,13 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
     SecureStore.deleteItemAsync(FIELD_SESSION_KEY).catch(() => undefined);
   }, []);
 
+  useEffect(() => {
+    setUnauthorizedListener(signOut, () => Boolean(data.session));
+    return () => {
+      setUnauthorizedListener(null);
+    };
+  }, [signOut, data.session]);
+
   const createManagedUser = useCallback((input: Omit<ManagedUser, "id" | "accountLinkId" | "status" | "createdAt" | "accessIssuedAt">) => {
     if (!canAdminManageAccount(data.session?.role)) return "";
     const accountLinkId = createId("account");
@@ -720,7 +726,29 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
     });
 
     // Broadcast newly created user to VM instance immediately so all other devices receive it
-    syncUsersWithServer([user]).catch((e) => console.warn("[UserSync] Push error:", e));
+    syncUsersWithServer([user])
+      .then((serverUsers) => {
+        if (serverUsers && Array.isArray(serverUsers) && serverUsers.length > 0) {
+          setData((current) => {
+            const nextUsers = current.managedUsers.map((localUser) => {
+              const localNorm = normalizeIdentifier(localUser.identifier);
+              const match = serverUsers.find((su) => normalizeIdentifier(su.identifier) === localNorm);
+              if (match) {
+                return {
+                  ...localUser,
+                  ...match,
+                  id: String(match.id),
+                };
+              }
+              return localUser;
+            });
+            const nextWorkspace = { ...current, managedUsers: nextUsers };
+            persistWorkspaceToStorage(nextWorkspace);
+            return nextWorkspace;
+          });
+        }
+      })
+      .catch((e) => console.warn("[UserSync] Push error:", e));
 
     return user.id;
   }, [data.session?.id, data.session?.role]);
@@ -755,8 +783,19 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
 
   const removeManagedUser = useCallback((userId: string) => {
     const target = data.managedUsers.find((user) => user.id === userId);
+    if (!target) return false;
+
+    // Refuse for non-numeric ids that have not been synced yet
+    const isNumericId = /^\d+$/.test(userId);
+    if (!isNumericId) {
+      Alert.alert(
+        "User Not Synced",
+        "This user has not finished syncing with the server yet. Please wait for sync to complete before deleting."
+      );
+      return false;
+    }
+
     if (
-      !target ||
       !canRemoveManagedAccount({
         role: data.session?.role,
         actorId: data.session?.id,
@@ -1381,7 +1420,7 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
     [],
   );
 
-  const sendMessage = useCallback((text: string) => {
+  const sendMessage = useCallback((text: string, options?: { targetUserId?: number; channelId?: string; skipNetworkSend?: boolean }) => {
     const message: ChatMessage = {
       id: createId("message"),
       text: text.trim(),
@@ -1397,20 +1436,56 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
       offlineQueue: [queueOperation("message", "Team message awaiting secure sync"), ...current.offlineQueue],
     }));
 
+    if (options?.skipNetworkSend) {
+      return;
+    }
+
     (async () => {
+      let targetUserId = options?.targetUserId;
+      let channelId = options?.channelId;
+
+      if (!targetUserId && !channelId) {
+        const actorRole = data.session?.role;
+        const isEmployee = actorRole === "employee";
+        if (isEmployee) {
+          if (data.session?.managerId) {
+            const m = parseInt(String(data.session.managerId), 10);
+            if (!isNaN(m) && m > 0) targetUserId = m;
+          }
+          if (!targetUserId) {
+            try {
+              const admin = await trpcClient.chat.getFirstActiveAdmin.query();
+              if (admin?.id) targetUserId = admin.id;
+            } catch {
+              const fallbackAdmin = data.managedUsers?.find(
+                (u) => u.role === "admin" && u.status === "active"
+              );
+              if (fallbackAdmin && !isNaN(Number(fallbackAdmin.id))) {
+                targetUserId = Number(fallbackAdmin.id);
+              }
+            }
+          }
+        }
+      }
+
       try {
-        const channel = await trpcClient.chat.getOrCreateChannel.mutate({ targetUserId: 1 });
-        if (channel?.id) {
-          await trpcClient.chat.sendMessage.mutate({ channelId: channel.id, message: message.text });
-        } else {
-          await enqueueOperation("CHAT_MESSAGE", { message: message.text }, "high");
+        if (!channelId && targetUserId) {
+          const channel = await trpcClient.chat.getOrCreateChannel.mutate({ targetUserId });
+          if (channel?.id) {
+            channelId = channel.id;
+          }
+        }
+        if (channelId) {
+          await trpcClient.chat.sendMessage.mutate({ channelId, message: message.text });
+        } else if (targetUserId) {
+          await enqueueOperation("CHAT_MESSAGE", { targetUserId, message: message.text }, "high");
         }
       } catch (err) {
         console.warn("[Chat] Server sendMessage queued offline:", err);
-        await enqueueOperation("CHAT_MESSAGE", { message: message.text }, "high").catch(() => {});
+        await enqueueOperation("CHAT_MESSAGE", { channelId, targetUserId, message: message.text }, "high").catch(() => {});
       }
     })();
-  }, []);
+  }, [data.session?.role, data.session?.managerId, data.managedUsers]);
 
   const addRoutePoint = useCallback((point: LocationEvidence) => {
     const routePoint: RoutePoint = { ...point, id: createId("route"), employeeId: data.session?.id };

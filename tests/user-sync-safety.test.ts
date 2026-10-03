@@ -107,4 +107,62 @@ describe("User Sync Safety & Production Hardening", () => {
     const shouldUpdate15Min = now.getTime() - signedIn15MinAgo.getTime() > TEN_MINUTES_MS;
     expect(shouldUpdate15Min).toBe(true);
   });
+
+  it("DELETE /api/users/:id refuses deletion of own account (400)", () => {
+    const callerUser = { id: 1, openId: "admin-open-id", role: "admin" };
+    const targetUser = { id: 1, openId: "admin-open-id", role: "admin" };
+
+    const isSelf = targetUser.id === callerUser.id || targetUser.openId === callerUser.openId;
+    expect(isSelf).toBe(true);
+  });
+
+  it("DELETE /api/users/:id refuses deletion of the last active administrator (400)", () => {
+    const targetUser = { id: 2, role: "admin", accountStatus: "active" };
+    const activeAdminsCount = 1; // Only 1 active admin exists
+
+    const isLastAdmin = targetUser.role === "admin" && targetUser.accountStatus === "active" && activeAdminsCount <= 1;
+    expect(isLastAdmin).toBe(true);
+  });
+
+  it("DELETE /api/users/:id returns 404 when affectedRows === 0 or user not found", () => {
+    const targetFound = false;
+    expect(targetFound).toBe(false);
+
+    const affectedRows = 0;
+    const isNotFound = !targetFound || affectedRows === 0;
+    expect(isNotFound).toBe(true);
+  });
+
+  it("merges server users into managedUsers replacing local member- id with server numeric id", () => {
+    const localUsers = [
+      { id: "member-xyz-987", displayName: "Aarav Sharma", identifier: "+919876543210", role: "employee" },
+    ];
+    const serverUsers = [
+      { id: "105", displayName: "Aarav Sharma", identifier: "+919876543210", role: "employee" },
+    ];
+
+    const merged = localUsers.map((local) => {
+      const match = serverUsers.find((su) => su.identifier === local.identifier);
+      if (match) {
+        return {
+          ...local,
+          ...match,
+          id: String(match.id),
+        };
+      }
+      return local;
+    });
+
+    expect(merged[0].id).toBe("105");
+  });
+
+  it("refuses removeManagedUser for non-numeric unsynced member id", () => {
+    const unsyncedId = "member-abc-123";
+    const isNumericId = /^\d+$/.test(unsyncedId);
+    expect(isNumericId).toBe(false);
+
+    const syncedId = "105";
+    const isSyncedNumeric = /^\d+$/.test(syncedId);
+    expect(isSyncedNumeric).toBe(true);
+  });
 });

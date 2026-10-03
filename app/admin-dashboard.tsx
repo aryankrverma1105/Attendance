@@ -47,6 +47,13 @@ export default function AdminDashboardScreen() {
   // Wage modal state
   const [editingUser, setEditingUser] = useState<ManagedUser | null>(null);
 
+  // Sites state
+  const [showSites, setShowSites] = useState(false);
+  const [siteName, setSiteName] = useState("");
+  const [siteLat, setSiteLat] = useState("");
+  const [siteLng, setSiteLng] = useState("");
+  const [siteRadius, setSiteRadius] = useState("100");
+
   const actorRole = data.session?.role;
   const actorId = data.session?.id;
   const isAdmin = actorRole === "admin";
@@ -63,6 +70,45 @@ export default function AdminDashboardScreen() {
   });
   const createUserMutation = trpc.workforce.createUser.useMutation();
   const setEmployeeWageMutation = trpc.workforce.setEmployeeWage.useMutation();
+
+  const sitesQuery = trpc.sites.list.useQuery(undefined, { enabled: isAdmin });
+  const createSiteMutation = trpc.sites.create.useMutation();
+  const deleteSiteMutation = trpc.sites.delete.useMutation();
+
+  const handleAddSite = async () => {
+    const lat = parseFloat(siteLat);
+    const lng = parseFloat(siteLng);
+    const radius = parseFloat(siteRadius) || 100;
+    if (!siteName.trim() || isNaN(lat) || isNaN(lng)) {
+      Alert.alert("Invalid Input", "Please provide a valid site name, latitude, and longitude.");
+      return;
+    }
+    try {
+      await createSiteMutation.mutateAsync({
+        name: siteName.trim(),
+        lat,
+        lng,
+        geofenceRadiusM: radius,
+      });
+      setSiteName("");
+      setSiteLat("");
+      setSiteLng("");
+      setSiteRadius("100");
+      await sitesQuery.refetch();
+      Alert.alert("Site Created", "Work site added successfully.");
+    } catch (err: any) {
+      Alert.alert("Error", err?.message || "Failed to create site.");
+    }
+  };
+
+  const handleDeleteSite = async (siteId: string) => {
+    try {
+      await deleteSiteMutation.mutateAsync({ id: siteId });
+      await sitesQuery.refetch();
+    } catch (err: any) {
+      Alert.alert("Error", err?.message || "Failed to delete site.");
+    }
+  };
 
   const allUsers: ManagedUser[] = useMemo(() => {
     if (usersQuery.data && Array.isArray(usersQuery.data)) {
@@ -266,6 +312,97 @@ export default function AdminDashboardScreen() {
             <Text style={styles.reviewBannerBtnText}>Review</Text>
           </Pressable>
         </Surface>
+
+        {/* Work Sites & Geofences Management (Admin Only) */}
+        {isAdmin && (
+          <Surface style={styles.reviewBannerCard}>
+            <View style={{ flex: 1, gap: 2 }}>
+              <Text style={styles.reviewBannerTitle}>Authorized Work Sites</Text>
+              <Text style={styles.reviewBannerSubtitle}>
+                {sitesQuery.data?.length ? `${sitesQuery.data.length} registered sites with GPS geofencing` : "No sites configured. Add company sites."}
+              </Text>
+            </View>
+            <Pressable
+              onPress={() => setShowSites((prev) => !prev)}
+              style={styles.reviewBannerBtn}
+            >
+              <MaterialIcons color="#92400E" name={showSites ? "expand-less" : "location-on"} size={16} />
+              <Text style={styles.reviewBannerBtnText}>{showSites ? "Hide" : "Manage"}</Text>
+            </Pressable>
+          </Surface>
+        )}
+
+        {isAdmin && showSites && (
+          <Surface style={styles.formCard}>
+            <Text style={styles.formTitle}>Manage Work Sites</Text>
+            <Text style={styles.formBody}>
+              Define authorized office locations and project sites. Check-ins outside these geofences require review.
+            </Text>
+
+            {/* List existing sites */}
+            {sitesQuery.data && sitesQuery.data.length > 0 && (
+              <View style={{ gap: 8, marginBottom: 12 }}>
+                {sitesQuery.data.map((s) => (
+                  <View key={s.id} style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", padding: 8, backgroundColor: "#F8FAFC", borderRadius: 8 }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontWeight: "600", fontSize: 14, color: "#0F172A" }}>{s.name}</Text>
+                      <Text style={{ fontSize: 12, color: "#64748B" }}>
+                        {s.lat.toFixed(4)}, {s.lng.toFixed(4)} (Radius: {s.geofenceRadiusM}m)
+                      </Text>
+                    </View>
+                    <Pressable onPress={() => handleDeleteSite(s.id)} style={{ padding: 6 }}>
+                      <MaterialIcons name="delete-outline" size={18} color="#EF4444" />
+                    </Pressable>
+                  </View>
+                ))}
+              </View>
+            )}
+
+            {/* Add new site form */}
+            <TextInput
+              onChangeText={setSiteName}
+              placeholder="Site Name (e.g. Headquarters / Solar Plant A)"
+              placeholderTextColor="#94A3B8"
+              style={styles.input}
+              value={siteName}
+            />
+            <View style={{ flexDirection: "row", gap: 8 }}>
+              <TextInput
+                keyboardType="numeric"
+                onChangeText={setSiteLat}
+                placeholder="Latitude (e.g. 28.6139)"
+                placeholderTextColor="#94A3B8"
+                style={[styles.input, { flex: 1 }]}
+                value={siteLat}
+              />
+              <TextInput
+                keyboardType="numeric"
+                onChangeText={setSiteLng}
+                placeholder="Longitude (e.g. 77.2090)"
+                placeholderTextColor="#94A3B8"
+                style={[styles.input, { flex: 1 }]}
+                value={siteLng}
+              />
+            </View>
+            <TextInput
+              keyboardType="numeric"
+              onChangeText={setSiteRadius}
+              placeholder="Geofence Radius in Meters (default: 100)"
+              placeholderTextColor="#94A3B8"
+              style={styles.input}
+              value={siteRadius}
+            />
+
+            <View style={{ marginTop: 8 }}>
+              <FieldButton
+                icon="add-location"
+                label={createSiteMutation.isPending ? "Adding Site..." : "Add Work Site"}
+                onPress={handleAddSite}
+                variant="primary"
+              />
+            </View>
+          </Surface>
+        )}
 
         {/* Create Invitation Form */}
         {showCreate ? (

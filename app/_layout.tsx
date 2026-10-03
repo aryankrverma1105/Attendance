@@ -75,6 +75,27 @@ function SessionGate({ children }: { children: ReactNode }) {
         } else {
           lastActiveRef.current = Date.now();
           resumeQueue();
+
+          // Session check in SessionGate: when AppState becomes active and session exists and device is online
+          if (data.session) {
+            (async () => {
+              try {
+                const netState = await Network.getNetworkStateAsync();
+                if (netState.isConnected && netState.isInternetReachable) {
+                  const { authedFetch } = await import("@/lib/_core/api");
+                  try {
+                    await authedFetch("/api/auth/me");
+                  } catch (err: any) {
+                    if (err?.status === 401) {
+                      handleGlobalUnauthorized("/api/auth/me");
+                    }
+                  }
+                }
+              } catch {
+                // Ignore network check failure
+              }
+            })();
+          }
         }
       } else if (nextState === "background" || nextState === "inactive") {
         lastActiveRef.current = Date.now();
@@ -161,15 +182,31 @@ export default function RootLayout() {
       console.warn("[OfflineSync] Reset stuck operations error:", err)
     );
 
-    // 2. Initial queue flush
-    flushOfflineQueue(dispatchQueuedOperation).catch(() => {});
+    // 2. Initial queue flush only if session token exists
+    (async () => {
+      try {
+        const { getSessionToken } = await import("@/lib/_core/auth");
+        const token = await getSessionToken();
+        if (token) {
+          flushOfflineQueue(dispatchQueuedOperation).catch(() => {});
+        }
+      } catch {}
+    })();
 
-    // 3. Auto-flush when network connectivity is restored
+    // 3. Auto-flush when network connectivity is restored AND a session token exists
     let netSub: { remove: () => void } | null = null;
     try {
-      netSub = Network.addNetworkStateListener((state) => {
+      netSub = Network.addNetworkStateListener(async (state) => {
         if (state.isConnected && state.isInternetReachable) {
-          flushOfflineQueue(dispatchQueuedOperation).catch(() => {});
+          try {
+            const { getSessionToken } = await import("@/lib/_core/auth");
+            const token = await getSessionToken();
+            if (token) {
+              flushOfflineQueue(dispatchQueuedOperation).catch(() => {});
+            }
+          } catch {
+            // ignore
+          }
         }
       });
     } catch (netErr) {

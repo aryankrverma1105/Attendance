@@ -32,6 +32,10 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
 
 async function startServer() {
   const isProd = process.env.NODE_ENV === "production";
+  if (isProd && process.env.ALLOW_INSECURE_DEV === "true") {
+    console.error("[Startup] FATAL: ALLOW_INSECURE_DEV is set in production. Insecure dev bypass cannot be enabled in production environments.");
+    process.exit(1);
+  }
   if (isProd) {
     const requiredEnv = ["DATABASE_URL", "JWT_SECRET", "ALLOWED_ORIGINS"];
     const missing = requiredEnv.filter((v) => !process.env[v]);
@@ -127,6 +131,19 @@ async function startServer() {
       }
     }
     await seedSuperAdmin();
+
+    // Check if sites table is empty and office coords unset
+    if (!process.env.OFFICE_LAT || !process.env.OFFICE_LNG) {
+      try {
+        const { listSites } = await import("../db");
+        const existingSites = await listSites();
+        if (existingSites.length === 0) {
+          console.warn("⚠️  [Startup Warning] LOUD WARNING: The sites table is empty and OFFICE_LAT/OFFICE_LNG environment variables are unset! All field employee check-ins will have unverified geofence status.");
+        }
+      } catch (err) {
+        console.warn("[Startup Warning] Could not inspect sites table:", err);
+      }
+    }
   } catch (err) {
     if (isProd) {
       console.error("[Startup] FATAL: Database initialization failed in production:", err);

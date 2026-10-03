@@ -252,12 +252,16 @@ export async function flushOfflineQueue(
           break; // Stop flushing remaining ops until user logs in
         }
 
-        // 400/403/BAD_REQUEST dead-letter
+        // 400/403/404/409/BAD_REQUEST/NOT_FOUND/CONFLICT dead-letter immediately
         const isDeadLetter =
           errStatus === 400 ||
           errStatus === 403 ||
+          errStatus === 404 ||
+          errStatus === 409 ||
           errCode === "BAD_REQUEST" ||
           errCode === "FORBIDDEN" ||
+          errCode === "NOT_FOUND" ||
+          errCode === "CONFLICT" ||
           errCode === "PARSE_ERROR";
 
         if (isDeadLetter) {
@@ -406,6 +410,10 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
         ? 401
         : err?.data?.code === "FORBIDDEN"
         ? 403
+        : err?.data?.code === "NOT_FOUND"
+        ? 404
+        : err?.data?.code === "CONFLICT"
+        ? 409
         : err?.data?.code === "BAD_REQUEST"
         ? 400
         : undefined);
@@ -654,16 +662,35 @@ async function executeDispatchQueuedOperation(op: QueuedOperation): Promise<bool
     }
 
     case "CHAT_MESSAGE": {
-      const channelId = p.channelId;
-      if (!channelId) {
-        throw new SyncOperationError("Cannot send chat message: channelId is missing", {
+      let channelId = p.channelId;
+      const targetUserId =
+        p.targetUserId !== undefined && p.targetUserId !== null
+          ? Number(p.targetUserId)
+          : undefined;
+      const message = String(p.message || p.text || "");
+
+      if (!channelId && (!targetUserId || isNaN(targetUserId))) {
+        throw new SyncOperationError("Cannot send chat message: both channelId and targetUserId are missing", {
           status: 400,
           code: "BAD_REQUEST",
         });
       }
+
+      if (!channelId && targetUserId) {
+        const channel = await trpcClient.chat.getOrCreateChannel.mutate({ targetUserId });
+        if (channel?.id) {
+          channelId = channel.id;
+        } else {
+          throw new SyncOperationError("Failed to resolve or create channel for target user", {
+            status: 500,
+            code: "INTERNAL_SERVER_ERROR",
+          });
+        }
+      }
+
       await trpcClient.chat.sendMessage.mutate({
         channelId: String(channelId),
-        message: String(p.message || p.text),
+        message,
         operationId: op.operationId || p.operationId,
       });
       await markRecordSyncedInStorage(op);

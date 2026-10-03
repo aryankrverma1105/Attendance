@@ -56,9 +56,13 @@ async function appendBackgroundPoints(locations: Location.LocationObject[]) {
     await enqueueOperation("GPS_POINT", point, "low").catch(() => {});
   }
 
-  // Flush queued points when online
+  // Flush queued points when online and session token exists
   try {
-    await flushOfflineQueue().catch(() => {});
+    const { getSessionToken } = await import("@/lib/_core/auth");
+    const token = await getSessionToken();
+    if (token) {
+      await flushOfflineQueue().catch(() => {});
+    }
   } catch {}
 }
 

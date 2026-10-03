@@ -4,7 +4,7 @@ import bcrypt from "bcryptjs";
 import rateLimit from "express-rate-limit";
 import { getDb } from "./db";
 import { users } from "../drizzle/schema";
-import { eq, or } from "drizzle-orm";
+import { eq, or, and } from "drizzle-orm";
 import { sdk } from "./_core/sdk";
 
 export async function verifyPasswordHash(password: string, storedHash: string): Promise<boolean> {
@@ -454,10 +454,45 @@ export function initUserSync(app: Express) {
       const db = await getDb();
       if (!db) return res.status(503).json({ success: false, error: "Database unavailable" });
 
-      if (!isNaN(numericId)) {
-        await db.update(users).set({ accountStatus: "removed" }).where(eq(users.id, numericId));
-      } else {
-        await db.update(users).set({ accountStatus: "removed" }).where(eq(users.openId, targetId));
+      const targetUsers = await db
+        .select()
+        .from(users)
+        .where(
+          !isNaN(numericId)
+            ? eq(users.id, numericId)
+            : eq(users.openId, targetId)
+        )
+        .limit(1);
+
+      if (targetUsers.length === 0) {
+        return res.status(404).json({ success: false, error: "User not found" });
+      }
+
+      const targetUser = targetUsers[0];
+
+      // Refuse to remove caller's own account (400)
+      if (targetUser.id === authUser.id || targetUser.openId === authUser.openId) {
+        return res.status(400).json({ success: false, error: "Cannot delete your own account" });
+      }
+
+      // Refuse to remove the last active admin (400)
+      if (targetUser.role === "admin" && targetUser.accountStatus === "active") {
+        const activeAdmins = await db
+          .select({ id: users.id })
+          .from(users)
+          .where(and(eq(users.role, "admin"), eq(users.accountStatus, "active")));
+        if (activeAdmins.length <= 1) {
+          return res.status(400).json({ success: false, error: "Cannot remove the last active administrator" });
+        }
+      }
+
+      const [result] = await db
+        .update(users)
+        .set({ accountStatus: "removed" })
+        .where(eq(users.id, targetUser.id));
+
+      if (result && typeof (result as any).affectedRows === "number" && (result as any).affectedRows === 0) {
+        return res.status(404).json({ success: false, error: "User not found" });
       }
 
       res.json({ success: true, message: "User removed successfully" });
