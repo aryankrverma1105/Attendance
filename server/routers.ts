@@ -491,12 +491,11 @@ export const appRouter = router({
         z.object({
           taskId: z.string(),
           status: z.enum(["PENDING", "IN_PROGRESS", "COMPLETED"]),
-          operationId: z.string().optional(),
         })
       )
       .mutation(async ({ ctx, input }) => {
         const { updateTaskStatus } = await import("./db");
-        return await updateTaskStatus(ctx.user, input.taskId, input.status, input.operationId);
+        return await updateTaskStatus(ctx.user, input.taskId, input.status);
       }),
   }),
 
@@ -721,7 +720,6 @@ export const appRouter = router({
           longitude: z.string().optional(),
           notes: z.string().optional(),
           status: z.enum(["active", "archived"]).optional(),
-          operationId: z.string().optional(),
         })
       )
       .mutation(async ({ ctx, input }) => {
@@ -770,7 +768,6 @@ export const appRouter = router({
           visitId: z.string(),
           latitude: z.string().optional(),
           longitude: z.string().optional(),
-          operationId: z.string().optional(),
         })
       )
       .mutation(async ({ ctx, input }) => {
@@ -778,7 +775,6 @@ export const appRouter = router({
         return await checkInVisit(ctx.user, input.visitId, {
           latitude: input.latitude,
           longitude: input.longitude,
-          operationId: input.operationId,
         });
       }),
     complete: protectedProcedure
@@ -790,7 +786,6 @@ export const appRouter = router({
           meetingOutcome: z.string().optional(),
           notes: z.string().optional(),
           followUpDate: z.string().optional(),
-          operationId: z.string().optional(),
         })
       )
       .mutation(async ({ ctx, input }) => {
@@ -801,7 +796,6 @@ export const appRouter = router({
           meetingOutcome: input.meetingOutcome,
           notes: input.notes,
           followUpDate: input.followUpDate,
-          operationId: input.operationId,
         });
       }),
     updateNotes: protectedProcedure
@@ -811,7 +805,6 @@ export const appRouter = router({
           meetingOutcome: z.string().optional(),
           notes: z.string().optional(),
           followUpDate: z.string().optional(),
-          operationId: z.string().optional(),
         })
       )
       .mutation(async ({ ctx, input }) => {
@@ -820,7 +813,6 @@ export const appRouter = router({
           meetingOutcome: input.meetingOutcome,
           notes: input.notes,
           followUpDate: input.followUpDate,
-          operationId: input.operationId,
         });
       }),
     addEvidence: protectedProcedure
@@ -830,7 +822,6 @@ export const appRouter = router({
           evidenceUrl: z.string(),
           latitude: z.string().optional(),
           longitude: z.string().optional(),
-          operationId: z.string().optional(),
         })
       )
       .mutation(async ({ ctx, input }) => {
@@ -841,10 +832,10 @@ export const appRouter = router({
 
   chat: router({
     getOrCreateChannel: protectedProcedure
-      .input(z.object({ targetUserId: z.number().optional() }).optional())
+      .input(z.object({ targetUserId: z.number() }))
       .mutation(async ({ ctx, input }) => {
         const { getOrCreateDirectChannel } = await import("./db");
-        return await getOrCreateDirectChannel(ctx.user, input?.targetUserId);
+        return await getOrCreateDirectChannel(ctx.user, input.targetUserId);
       }),
     getMessages: protectedProcedure
       .input(z.object({ channelId: z.string(), limit: z.number().optional() }))

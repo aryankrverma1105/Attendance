@@ -262,8 +262,6 @@ export const visitEvidence = mysqlTable("visit_evidence", {
   evidenceUrl: text("evidenceUrl").notNull(),
   latitude: varchar("latitude", { length: 32 }),
   longitude: varchar("longitude", { length: 32 }),
-  /** Unique operation ID for client-server replay idempotency. */
-  operationId: varchar("operationId", { length: 128 }).unique(),
   capturedAt: timestamp("capturedAt").defaultNow().notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });
@@ -383,22 +381,4 @@ export const sites = mysqlTable("sites", {
 
 export type DbSite = typeof sites.$inferSelect;
 export type InsertDbSite = typeof sites.$inferInsert;
-
-/**
- * Dedicated idempotency ledger binding operations to authenticated user IDs and operation types.
- */
-export const idempotencyKeys = mysqlTable("idempotency_keys", {
-  id: varchar("id", { length: 36 }).primaryKey(),
-  userId: int("userId")
-    .references(() => users.id)
-    .notNull(),
-  operationType: varchar("operationType", { length: 64 }).notNull(),
-  operationId: varchar("operationId", { length: 128 }).notNull().unique(),
-  recordId: varchar("recordId", { length: 64 }),
-  responsePayload: text("responsePayload"),
-  createdAt: timestamp("createdAt").defaultNow().notNull(),
-});
-
-export type DbIdempotencyKey = typeof idempotencyKeys.$inferSelect;
-export type InsertDbIdempotencyKey = typeof idempotencyKeys.$inferInsert;
 

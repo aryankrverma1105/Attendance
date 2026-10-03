@@ -28,13 +28,6 @@ export function initSelfieStorage(app: Express) {
       const isDevBypass = process.env.ALLOW_INSECURE_DEV === "true";
 
       if (!isDevBypass) {
-        const authHeader = req.headers.authorization;
-        const cookie = req.headers.cookie;
-        if (!authHeader && !cookie && !req.query.token) {
-          return res.status(401).json({
-            error: "Authentication required to view workforce evidence",
-          });
-        }
         const authUser = await sdk.authenticateRequest(req);
         if (authUser.role === "employee") {
           const requestedFilename = path.basename(req.path);

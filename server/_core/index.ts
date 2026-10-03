@@ -107,15 +107,11 @@ async function startServer() {
 
   app.get("/api/ready", async (_req, res) => {
     try {
-      const { checkDbReadiness } = await import("../db");
-      const isDbReady = await checkDbReadiness();
-      if (isDbReady) {
-        return res.status(200).json({ ok: true, status: "ready", dbConnected: true, timestamp: Date.now() });
-      } else {
-        return res.status(503).json({ ok: false, status: "unready", dbConnected: false, timestamp: Date.now() });
-      }
+      const { getDb } = await import("../db");
+      const db = await getDb();
+      res.json({ ok: true, status: "ready", dbConnected: !!db, timestamp: Date.now() });
     } catch (err: any) {
-      return res.status(503).json({ ok: false, status: "unready", dbConnected: false, error: err?.message || String(err) });
+      res.status(503).json({ ok: false, status: "unready", error: err?.message || String(err) });
     }
   });
 
@@ -128,20 +124,10 @@ async function startServer() {
   );
 
   const preferredPort = parseInt(process.env.PORT || "3000");
-  let port = preferredPort;
+  const port = await findAvailablePort(preferredPort);
 
-  if (isProd) {
-    const available = await isPortAvailable(preferredPort);
-    if (!available) {
-      console.error(`[Startup] CRITICAL ERROR: Port ${preferredPort} is already in use or unavailable in production. Refusing startup.`);
-      process.exit(1);
-    }
-    port = preferredPort;
-  } else {
-    port = await findAvailablePort(preferredPort);
-    if (port !== preferredPort) {
-      console.log(`Port ${preferredPort} is busy, using port ${port} instead`);
-    }
+  if (port !== preferredPort) {
+    console.log(`Port ${preferredPort} is busy, using port ${port} instead`);
   }
 
   server.listen(port, () => {

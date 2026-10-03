@@ -442,8 +442,7 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
       } else if (p.nextAction === "VISIT_EVIDENCE") {
         await trpcClient.visits.addEvidence.mutate({
           ...p.visitPayload,
-          evidenceUrl: serverUrl,
-          operationId: op.operationId || p.operationId,
+          photoUri: serverUrl,
         });
       }
       await markRecordSyncedInStorage(op);
@@ -490,7 +489,6 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
       await trpcClient.tasks.updateStatus.mutate({
         taskId: String(p.taskId),
         status: p.status,
-        operationId: op.operationId || p.operationId,
       });
       await markRecordSyncedInStorage(op);
       return true;
@@ -522,7 +520,6 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
         longitude: p.longitude !== undefined && p.longitude !== null ? String(p.longitude) : undefined,
         notes: p.notes,
         status: p.status,
-        operationId: op.operationId || p.operationId,
       });
       await markRecordSyncedInStorage(op);
       return true;
@@ -546,7 +543,6 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
         visitId: String(p.visitId),
         latitude: p.latitude !== undefined && p.latitude !== null ? String(p.latitude) : undefined,
         longitude: p.longitude !== undefined && p.longitude !== null ? String(p.longitude) : undefined,
-        operationId: op.operationId || p.operationId,
       });
       await markRecordSyncedInStorage(op);
       return true;
@@ -558,7 +554,6 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
         meetingOutcome: p.meetingOutcome,
         notes: p.notes,
         followUpDate: p.followUpDate,
-        operationId: op.operationId || p.operationId,
       });
       await markRecordSyncedInStorage(op);
       return true;
@@ -572,7 +567,6 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
         meetingOutcome: p.meetingOutcome,
         notes: p.notes,
         followUpDate: p.followUpDate,
-        operationId: op.operationId || p.operationId,
       });
       await markRecordSyncedInStorage(op);
       return true;
@@ -584,7 +578,6 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
         evidenceUrl: String(p.evidenceUrl || p.photoUri),
         latitude: p.latitude !== undefined && p.latitude !== null ? String(p.latitude) : undefined,
         longitude: p.longitude !== undefined && p.longitude !== null ? String(p.longitude) : undefined,
-        operationId: op.operationId || p.operationId,
       });
       await markRecordSyncedInStorage(op);
       return true;
@@ -606,13 +599,10 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
     case "CHAT_MESSAGE": {
       let channelId = p.channelId;
       if (!channelId) {
-        const targetUserId = p.targetUserId !== undefined && p.targetUserId !== null ? Number(p.targetUserId) : undefined;
-        const channel = await trpcClient.chat.getOrCreateChannel.mutate(
-          targetUserId ? { targetUserId } : undefined
-        );
+        const channel = await trpcClient.chat.getOrCreateChannel.mutate({ targetUserId: 1 });
         channelId = channel?.id;
       }
-      if (!channelId) throw new Error("Could not resolve chat channel: missing channelId and targetUserId");
+      if (!channelId) throw new Error("Could not resolve chat channel");
       await trpcClient.chat.sendMessage.mutate({
         channelId,
         message: String(p.message || p.text),

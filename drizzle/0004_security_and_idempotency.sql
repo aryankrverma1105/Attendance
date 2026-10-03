@@ -22,17 +22,4 @@ ALTER TABLE `visits` ADD CONSTRAINT `visits_operationId_unique` UNIQUE(`operatio
 ALTER TABLE `expenses` ADD `operationId` varchar(128);--> statement-breakpoint
 ALTER TABLE `expenses` ADD CONSTRAINT `expenses_operationId_unique` UNIQUE(`operationId`);--> statement-breakpoint
 ALTER TABLE `chat_messages` ADD `operationId` varchar(128);--> statement-breakpoint
-ALTER TABLE `chat_messages` ADD CONSTRAINT `chat_messages_operationId_unique` UNIQUE(`operationId`);--> statement-breakpoint
-ALTER TABLE `visit_evidence` ADD `operationId` varchar(128);--> statement-breakpoint
-ALTER TABLE `visit_evidence` ADD CONSTRAINT `visit_evidence_operationId_unique` UNIQUE(`operationId`);--> statement-breakpoint
-CREATE TABLE IF NOT EXISTS `idempotency_keys` (
-  `id` varchar(36) NOT NULL PRIMARY KEY,
-  `userId` int NOT NULL,
-  `operationType` varchar(64) NOT NULL,
-  `operationId` varchar(128) NOT NULL,
-  `recordId` varchar(64),
-  `responsePayload` text,
-  `createdAt` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  CONSTRAINT `idempotency_keys_operationId_unique` UNIQUE(`operationId`),
-  CONSTRAINT `idempotency_keys_userId_users_id_fk` FOREIGN KEY (`userId`) REFERENCES `users`(`id`) ON DELETE CASCADE
-);
+ALTER TABLE `chat_messages` ADD CONSTRAINT `chat_messages_operationId_unique` UNIQUE(`operationId`);
