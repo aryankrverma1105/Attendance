@@ -33,6 +33,8 @@ describe("Admin Authorization & Operational Constraint Security", () => {
     accountStatus: "active",
     dailyWage: 0,
     managerId: null,
+    passwordHash: null,
+    tokenVersion: 1,
     createdAt: new Date(),
     updatedAt: new Date(),
     lastSignedIn: new Date(),

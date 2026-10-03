@@ -57,20 +57,47 @@ export default function AdminDashboardScreen() {
   const currentMonth = now.getMonth() + 1;
   const currentYear = now.getFullYear();
 
+  const usersQuery = trpc.workforce.listUsers.useQuery(undefined, {
+    enabled: hasAccess,
+    refetchInterval: 10000,
+  });
   const createUserMutation = trpc.workforce.createUser.useMutation();
+  const setEmployeeWageMutation = trpc.workforce.setEmployeeWage.useMutation();
+
+  const allUsers: ManagedUser[] = useMemo(() => {
+    if (usersQuery.data && Array.isArray(usersQuery.data)) {
+      return usersQuery.data.map((u) => {
+        const role: FieldRole = u.role === "admin" ? "admin" : u.role === "manager" ? "manager" : "employee";
+        const status = (u.accountStatus === "removed" ? "suspended" : u.accountStatus) as "active" | "invited" | "suspended";
+        return {
+          id: String(u.id),
+          accountLinkId: `account-${u.id}`,
+          displayName: u.name || u.phoneE164 || `User #${u.id}`,
+          identifier: u.phoneE164 || u.openId || String(u.id),
+          role,
+          status,
+          department: undefined,
+          dailyWage: u.dailyWage ?? 0,
+          managerId: u.managerId ? String(u.managerId) : undefined,
+          createdAt: new Date(u.createdAt).toISOString(),
+        };
+      });
+    }
+    return data.managedUsers;
+  }, [usersQuery.data, data.managedUsers]);
 
   // Filter users by scope:
   // Admin sees all users.
   // Manager sees team members (matching managerId or assigned scope).
   const scopedUsers = useMemo(() => {
-    if (isAdmin) return data.managedUsers;
+    if (isAdmin) return allUsers;
     if (isManager) {
-      return data.managedUsers.filter(
+      return allUsers.filter(
         (user) => user.managerId === actorId || user.role === "employee"
       );
     }
     return [];
-  }, [data.managedUsers, isAdmin, isManager, actorId]);
+  }, [allUsers, isAdmin, isManager, actorId]);
 
   const visibleUsers = useMemo(() => {
     return scopedUsers.filter((user) => {
@@ -119,39 +146,31 @@ export default function AdminDashboardScreen() {
     const parsedWage = initialWage.trim() ? Number(initialWage.trim()) : 0;
     const validatedWage = role === "employee" ? (isNaN(parsedWage) || parsedWage < 0 ? 0 : Math.round(parsedWage)) : 0;
 
-    // 1. Local state update
-    createManagedUser({
-      displayName: name.trim(),
-      identifier: cleanPhone,
-      role,
-      department: department.trim() || undefined,
-      dailyWage: validatedWage,
-      managerId: role === "employee" && isManager ? actorId : undefined,
-    });
-
-    // 2. Server mutation if Admin
-    if (isAdmin) {
-      await createUserMutation.mutateAsync({
+    try {
+      const created = await createUserMutation.mutateAsync({
         name: name.trim(),
         phoneE164: cleanPhone,
         role,
         department: department.trim() || undefined,
         dailyWage: validatedWage,
-      }).catch((err: unknown) => {
-        console.warn("[Admin] Server user creation sync queued:", err);
+        managerId: role === "employee" && isManager ? (actorId ? Number(actorId) : undefined) : undefined,
       });
-    }
 
-    setName("");
-    setIdentifier("");
-    setDepartment("");
-    setInitialWage("");
-    setRole("employee");
-    setShowCreate(false);
-    Alert.alert(
-      "Account invitation created",
-      "The account invitation and configured daily wage have been safely queued."
-    );
+      await usersQuery.refetch();
+
+      setName("");
+      setIdentifier("");
+      setDepartment("");
+      setInitialWage("");
+      setRole("employee");
+      setShowCreate(false);
+      Alert.alert(
+        "Account Created",
+        `User ${created.user.name || created.user.phoneE164} created successfully on the server.`
+      );
+    } catch (err: any) {
+      Alert.alert("User Creation Failed", err?.message || "Could not create user on server.");
+    }
   };
 
   if (!hasAccess) {
@@ -232,6 +251,21 @@ export default function AdminDashboardScreen() {
             value={formatCurrency(totalEstimatedPayroll)}
           />
         </View>
+
+        {/* Attendance Review Quick Action */}
+        <Surface style={styles.reviewBannerCard}>
+          <View style={{ flex: 1, gap: 2 }}>
+            <Text style={styles.reviewBannerTitle}>Attendance Geofence Reviews</Text>
+            <Text style={styles.reviewBannerSubtitle}>Audit and approve check-ins flagged outside assigned sites.</Text>
+          </View>
+          <Pressable
+            onPress={() => router.push("/attendance-review" as any)}
+            style={styles.reviewBannerBtn}
+          >
+            <MaterialIcons color="#92400E" name="verified" size={16} />
+            <Text style={styles.reviewBannerBtnText}>Review</Text>
+          </Pressable>
+        </Surface>
 
         {/* Create Invitation Form */}
         {showCreate ? (
@@ -454,9 +488,18 @@ export default function AdminDashboardScreen() {
             currentWage={editingUser.dailyWage || 0}
             employeeName={editingUser.displayName}
             onClose={() => setEditingUser(null)}
-            onSave={(newWage) => {
-              updateEmployeeWage(editingUser.id, newWage);
-              setEditingUser(null);
+            onSave={async (newWage) => {
+              try {
+                await setEmployeeWageMutation.mutateAsync({
+                  targetUserId: Number(editingUser.id),
+                  dailyWage: Math.round(Number(newWage)),
+                });
+                await usersQuery.refetch();
+                setEditingUser(null);
+                Alert.alert("Wage Updated", `Daily wage for ${editingUser.displayName} updated.`);
+              } catch (err: any) {
+                Alert.alert("Wage Update Failed", err?.message || "Failed to update employee wage on server.");
+              }
             }}
             visible={Boolean(editingUser)}
           />
@@ -612,6 +655,31 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     maxWidth: 270,
   },
+  reviewBannerCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    padding: 14,
+    backgroundColor: "#FFFBEB",
+    borderColor: "#FDE68A",
+    borderWidth: 1,
+    borderRadius: 14,
+  },
+  reviewBannerTitle: { color: "#0B192C", fontSize: 14, fontWeight: "900" },
+  reviewBannerSubtitle: { color: "#64748B", fontSize: 11, lineHeight: 15 },
+  reviewBannerBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: "#FEF3C7",
+    borderWidth: 1,
+    borderColor: "#FDE68A",
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 10,
+  },
+  reviewBannerBtnText: { color: "#92400E", fontSize: 12, fontWeight: "800" },
   restricted: { alignItems: "center", gap: 12, paddingVertical: 36, paddingHorizontal: 20 },
   restrictedTitle: { color: "#0F172A", fontSize: 18, fontWeight: "900" },
   restrictedBody: {

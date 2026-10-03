@@ -33,6 +33,8 @@ describe("Employee Authorization & Self-Scoping Defense Security", () => {
     accountStatus: "active",
     dailyWage: 750,
     managerId: 10,
+    passwordHash: null,
+    tokenVersion: 1,
     createdAt: new Date(),
     updatedAt: new Date(),
     lastSignedIn: new Date(),

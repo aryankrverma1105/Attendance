@@ -10,24 +10,10 @@ import { ScreenContainer } from "@/components/screen-container";
 import { useFieldData } from "@/lib/field-data";
 import { getApiBaseUrl } from "@/constants/oauth";
 import { trpc } from "@/lib/trpc";
-import type { FieldRole, ManagedUser } from "@/lib/field-types";
-
-function matchPhone(a?: string, b?: string): boolean {
-  if (!a || !b) return false;
-  const sa = a.trim().toLowerCase();
-  const sb = b.trim().toLowerCase();
-  if (sa === sb) return true;
-  const da = sa.replace(/[^0-9]/g, "");
-  const db = sb.replace(/[^0-9]/g, "");
-  if (!da || !db) return false;
-  const ka = da.length >= 10 ? da.slice(-10) : da;
-  const kb = db.length >= 10 ? db.slice(-10) : db;
-  return ka === kb;
-}
 
 export default function LoginScreen() {
   const router = useRouter();
-  const { data, signInToPreview, createManagedUser } = useFieldData();
+  const { setServerSession } = useFieldData();
   const [identifier, setIdentifier] = useState("");
   const [mode, setMode] = useState<"password" | "otp">("password");
   const [password, setPassword] = useState("");
@@ -60,155 +46,50 @@ export default function LoginScreen() {
     setNotice(null);
     setIsRequesting(true);
 
-    const isDevMode = typeof __DEV__ !== "undefined" && __DEV__;
-    const digitsOnly = cleanPhone.replace(/[^0-9]/g, "");
-    const isAdminAccount = cleanPhone.toLowerCase().includes("admin") || (isDevMode && digitsOnly.includes("9835916278"));
-
     if (mode === "password") {
       if (!password.trim()) {
         setNotice("Please enter your password.");
+        setIsRequesting(false);
         return;
       }
 
-      // Check Administrator Credentials
-      if (isAdminAccount) {
-        const expectedAdminPass = process.env.EXPO_PUBLIC_ADMIN_PASSWORD || process.env.ADMIN_PASSWORD;
-        const isPassValid = expectedAdminPass
-          ? password === expectedAdminPass
-          : (isDevMode && password === "Sologix12345") || password === "Sologix12345";
-
-        if (isPassValid) {
-          // Attempt server password-login to issue signed session token
-          try {
-            const apiBase = getApiBaseUrl();
-            if (apiBase) {
-              const res = await fetch(`${apiBase}/api/auth/password-login`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ identifier: cleanPhone, password }),
-              });
-              const loginData = await res.json();
-              if (loginData?.success && loginData?.token) {
-                const { setSessionToken, setUserInfo } = require("@/lib/_core/auth");
-                await setSessionToken(loginData.token);
-                if (loginData.user) await setUserInfo(loginData.user);
-              }
-            }
-          } catch (serverErr) {
-            console.warn("[Login] Admin server session warning:", serverErr);
-          }
-
-          signInToPreview(cleanPhone, "admin", "Aryan Kumar Verma");
-          router.replace("/(tabs)");
-          return;
-        } else {
-          setNotice("Incorrect password for Administrator account.");
-          return;
-        }
-      }
-
-      // Check Managed Users (Created by Admin)
-      const inputClean = cleanPhone.toLowerCase().trim();
-      const inputDigits = cleanPhone.replace(/[^0-9]/g, "");
-      const inputLast10 = inputDigits.length >= 10 ? inputDigits.slice(-10) : inputDigits;
-
-      let existingUser = data.managedUsers.find((u) => {
-        const uDigits = (u.identifier || "").replace(/[^0-9]/g, "");
-        const uLast10 = uDigits.length >= 10 ? uDigits.slice(-10) : uDigits;
-        const uName = (u.displayName || "").toLowerCase().trim();
-        return (
-          matchPhone(u.identifier, cleanPhone) ||
-          (inputLast10 && uLast10 && inputLast10 === uLast10) ||
-          (inputClean && uName === inputClean)
-        );
-      });
-
-      // Query the VM server database for cross-device synchronization!
       try {
         const apiBase = getApiBaseUrl();
-        if (apiBase) {
-          const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 3500);
-          const checkRes = await fetch(`${apiBase}/api/users/check?phone=${encodeURIComponent(cleanPhone)}`, {
-            signal: controller.signal,
-          });
-          clearTimeout(timeout);
-          const checkData = await checkRes.json();
-          if (checkData?.found && checkData?.user) {
-            const serverU = checkData.user;
-            const updatedUser: ManagedUser = {
-              id: existingUser?.id || serverU.id || `user-${Date.now()}`,
-              accountLinkId: existingUser?.accountLinkId || `account-${Date.now()}`,
-              displayName: serverU.displayName || existingUser?.displayName || cleanPhone,
-              identifier: serverU.identifier || existingUser?.identifier || cleanPhone,
-              role: serverU.role || existingUser?.role || "employee",
-              status: serverU.status || existingUser?.status || "active",
-              department: serverU.department || existingUser?.department,
-              dailyWage: serverU.dailyWage ?? existingUser?.dailyWage ?? 0,
-              password: serverU.password || existingUser?.password,
-              createdAt: serverU.createdAt || existingUser?.createdAt || new Date().toISOString(),
-            };
-            existingUser = updatedUser;
-            // Cache into local storage so future logins are instant
-            createManagedUser({
-              displayName: updatedUser.displayName,
-              identifier: updatedUser.identifier,
-              role: updatedUser.role,
-              department: updatedUser.department,
-              dailyWage: updatedUser.dailyWage,
-              password: updatedUser.password,
-            });
-          }
-        }
-      } catch (checkErr) {
-        console.warn("[Login] VM server check fallback:", checkErr);
-      }
-
-      if (existingUser) {
-        if ((existingUser.status as string) === "suspended" || (existingUser.status as string) === "removed") {
-          setNotice("This account has been deactivated or suspended by the Administrator.");
+        if (!apiBase) {
+          setNotice("API service unavailable. Please check your network connection.");
+          setIsRequesting(false);
           return;
         }
 
-        // If Admin set a specific password for this user, enforce it
-        if (existingUser.password && existingUser.password.trim()) {
-          if (password !== existingUser.password.trim()) {
-            setNotice("Incorrect password for this account. Please ask your Administrator to reset it if needed.");
-            return;
-          }
+        const res = await fetch(`${apiBase}/api/auth/password-login`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ identifier: cleanPhone, password }),
+        });
+
+        const loginData = await res.json().catch(() => null);
+
+        if (!res.ok || !loginData?.success || !loginData?.token) {
+          setNotice(loginData?.message || "Invalid credentials or account inactive.");
+          setIsRequesting(false);
+          return;
         }
 
-        // Attempt server password-login to issue signed session token
-        try {
-          const apiBase = getApiBaseUrl();
-          if (apiBase) {
-            const res = await fetch(`${apiBase}/api/auth/password-login`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ identifier: cleanPhone, password }),
-            });
-            const loginData = await res.json();
-            if (loginData?.success && loginData?.token) {
-              const { setSessionToken, setUserInfo } = require("@/lib/_core/auth");
-              await setSessionToken(loginData.token);
-              if (loginData.user) await setUserInfo(loginData.user);
-            }
-          }
-        } catch (authErr) {
-          console.warn("[Login] Server password session warning:", authErr);
+        const { setSessionToken, setUserInfo } = require("@/lib/_core/auth");
+        await setSessionToken(loginData.token);
+        if (loginData.user) {
+          await setUserInfo(loginData.user);
+          setServerSession(loginData.user);
         }
 
-        // Log in with assigned user role (Admin/Manager/Employee) and actual display name
-        signInToPreview(existingUser.identifier, existingUser.role, existingUser.displayName);
         router.replace("/(tabs)");
         return;
+      } catch (err: any) {
+        setNotice(err?.message || "Failed to reach server. Please check your network connection.");
+        return;
+      } finally {
+        setIsRequesting(false);
       }
-
-      // If user is not found in database or directory, prompt clearly instead of silently degrading role
-      setNotice(
-        "No registered account found for this phone number. Please ensure your Administrator has added you in User Management."
-      );
-      return;
     }
 
     // OTP Mode: Firebase Phone SMS verification handles carrier OTP delivery for any phone number
@@ -297,9 +178,6 @@ export default function LoginScreen() {
     setNotice(null);
     setIsVerifying(true);
 
-    const digitsOnly = identifier.trim().replace(/[^0-9]/g, "");
-    const isAdminAccount = digitsOnly.includes("9835916278") || identifier.toLowerCase().includes("admin");
-
     try {
       let idToken = "";
 
@@ -311,44 +189,17 @@ export default function LoginScreen() {
       }
 
       // Send token to backend to activate / sign-in
-      try {
-        const result = await activateMutation.mutateAsync({ idToken });
+      const result = await activateMutation.mutateAsync({ idToken });
 
-        if (result.success && result.user) {
-          const { setSessionToken, setUserInfo } = require("@/lib/_core/auth");
-          if (result.token) {
-            await setSessionToken(result.token);
-          }
-          await setUserInfo(result.user);
-
-          const mappedRole: FieldRole = result.user.role === "admin" ? "admin" : result.user.role === "manager" ? "manager" : "employee";
-          signInToPreview(result.user.phoneE164 || result.user.openId, mappedRole, result.user.name || undefined);
-          router.replace("/(tabs)");
-          return;
-        }
-      } catch (mutateErr) {
-        console.warn("[Auth] Activation fallback:", mutateErr);
-        if (isAdminAccount) {
-          signInToPreview("+919835916278", "admin", "Aryan Kumar Verma");
-        } else {
-          let matched = data.managedUsers.find((u) => matchPhone(u.identifier, identifier));
-          if (!matched) {
-            try {
-              const apiBase = getApiBaseUrl();
-              if (apiBase) {
-                const checkRes = await fetch(`${apiBase}/api/users/check?phone=${encodeURIComponent(identifier.trim())}`);
-                const checkData = await checkRes.json();
-                if (checkData?.found && checkData?.user) {
-                  matched = checkData.user;
-                  createManagedUser(checkData.user);
-                }
-              }
-            } catch {}
-          }
-          signInToPreview(matched ? matched.identifier : identifier.trim(), matched?.role || "employee", matched?.displayName);
-        }
+      if (result?.success && result?.user && result?.token) {
+        const { setSessionToken, setUserInfo } = require("@/lib/_core/auth");
+        await setSessionToken(result.token);
+        await setUserInfo(result.user);
+        setServerSession(result.user);
         router.replace("/(tabs)");
         return;
+      } else {
+        setNotice("Account activation failed. Please contact your administrator.");
       }
     } catch (error) {
       console.error("[Auth] Verification failed:", error);

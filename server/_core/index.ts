@@ -30,7 +30,18 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
 }
 
 async function startServer() {
+  const isProd = process.env.NODE_ENV === "production";
+  if (isProd) {
+    const requiredEnv = ["DATABASE_URL", "JWT_SECRET", "ALLOWED_ORIGINS"];
+    const missing = requiredEnv.filter((v) => !process.env[v]);
+    if (missing.length > 0) {
+      console.error(`[Startup] CRITICAL ERROR: Missing required production environment variables: ${missing.join(", ")}`);
+      process.exit(1);
+    }
+  }
+
   const app = express();
+  app.set("trust proxy", 1);
   const server = createServer(app);
 
   // Security headers
@@ -38,7 +49,7 @@ async function startServer() {
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("X-Frame-Options", "DENY");
     res.setHeader("X-XSS-Protection", "1; mode=block");
-    if (process.env.NODE_ENV === "production") {
+    if (isProd) {
       res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
     }
     next();
@@ -82,6 +93,13 @@ async function startServer() {
   registerOAuthRoutes(app);
   initSelfieStorage(app);
   initUserSync(app);
+
+  try {
+    const { seedSuperAdmin } = await import("../db");
+    await seedSuperAdmin();
+  } catch (err) {
+    console.warn("[Startup] Failed to seed super admin:", err);
+  }
 
   app.get("/api/health", (_req, res) => {
     res.json({ ok: true, status: "healthy", timestamp: Date.now() });

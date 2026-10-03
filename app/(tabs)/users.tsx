@@ -58,15 +58,43 @@ export default function AdminUsersScreen() {
   const currentMonth = now.getMonth() + 1;
   const currentYear = now.getFullYear();
 
+  const usersQuery = trpc.workforce.listUsers.useQuery(undefined, {
+    enabled: canManage,
+    refetchInterval: 10000,
+  });
   const createUserMutation = trpc.workforce.createUser.useMutation();
+  const updateUserStatusMutation = trpc.workforce.updateUserStatus.useMutation();
+  const setEmployeeWageMutation = trpc.workforce.setEmployeeWage.useMutation();
+
+  const allUsers: ManagedUser[] = useMemo(() => {
+    if (usersQuery.data && Array.isArray(usersQuery.data)) {
+      return usersQuery.data.map((u) => {
+        const role: FieldRole = u.role === "admin" ? "admin" : u.role === "manager" ? "manager" : "employee";
+        const status = (u.accountStatus === "removed" ? "suspended" : u.accountStatus) as "active" | "invited" | "suspended";
+        return {
+          id: String(u.id),
+          accountLinkId: `account-${u.id}`,
+          displayName: u.name || u.phoneE164 || `User #${u.id}`,
+          identifier: u.phoneE164 || u.openId || String(u.id),
+          role,
+          status,
+          department: undefined,
+          dailyWage: u.dailyWage ?? 0,
+          managerId: u.managerId ? String(u.managerId) : undefined,
+          createdAt: new Date(u.createdAt).toISOString(),
+        };
+      });
+    }
+    return data.managedUsers;
+  }, [usersQuery.data, data.managedUsers]);
 
   const managers = useMemo(() => {
-    return data.managedUsers.filter((u) => u.role === "manager" && u.status === "active");
-  }, [data.managedUsers]);
+    return allUsers.filter((u) => u.role === "manager" && u.status === "active");
+  }, [allUsers]);
 
   const visibleUsers = useMemo(() => {
     const seen = new Set<string>();
-    return data.managedUsers.filter((user) => {
+    return allUsers.filter((user) => {
       const digits = (user.identifier || "").replace(/[^0-9]/g, "");
       const key = digits.length >= 10 ? digits.slice(-10) : user.identifier.toLowerCase();
       if (seen.has(key)) return false;
@@ -81,12 +109,12 @@ export default function AdminUsersScreen() {
       const matchesStatus = statusFilter === "all" || user.status === statusFilter;
       return matchesQuery && matchesRole && matchesStatus;
     });
-  }, [data.managedUsers, query, roleFilter, statusFilter]);
+  }, [allUsers, query, roleFilter, statusFilter]);
 
-  const activeCount = data.managedUsers.filter((u) => u.status === "active").length;
-  const suspendedCount = data.managedUsers.filter((u) => u.status === "suspended").length;
-  const managersCount = data.managedUsers.filter((u) => u.role === "manager").length;
-  const employeesCount = data.managedUsers.filter((u) => u.role === "employee").length;
+  const activeCount = allUsers.filter((u) => u.status === "active").length;
+  const suspendedCount = allUsers.filter((u) => u.status === "suspended").length;
+  const managersCount = allUsers.filter((u) => u.role === "manager").length;
+  const employeesCount = allUsers.filter((u) => u.role === "employee").length;
 
   const createAccount = async () => {
     if (!name.trim() || !identifier.trim()) {
@@ -107,44 +135,37 @@ export default function AdminUsersScreen() {
     const parsedWage = initialWage.trim() ? Number(initialWage.trim()) : 0;
     const validatedWage = role === "employee" ? (isNaN(parsedWage) || parsedWage < 0 ? 0 : Math.round(parsedWage)) : 0;
 
-    createManagedUser({
-      displayName: name.trim(),
-      identifier: cleanPhone,
-      password: password.trim() || undefined,
-      role,
-      department: department.trim() || undefined,
-      dailyWage: validatedWage,
-      managerId: role === "employee" && selectedManagerId ? selectedManagerId : undefined,
-    });
-
-    if (isAdmin) {
-      await createUserMutation.mutateAsync({
+    try {
+      const created = await createUserMutation.mutateAsync({
         name: name.trim(),
         phoneE164: cleanPhone,
         role,
         department: department.trim() || undefined,
         dailyWage: validatedWage,
         managerId: role === "employee" && selectedManagerId ? Number(selectedManagerId) : undefined,
-      }).catch((err: unknown) => {
-        console.warn("[Admin] Server user creation sync queued:", err);
       });
-    }
 
-    setName("");
-    setIdentifier("");
-    setPassword("");
-    setDepartment("");
-    setInitialWage("");
-    setSelectedManagerId("");
-    setRole("employee");
-    setShowCreate(false);
+      await usersQuery.refetch();
+
+      setName("");
+      setIdentifier("");
+      setPassword("");
+      setDepartment("");
+      setInitialWage("");
+      setSelectedManagerId("");
+      setRole("employee");
+      setShowCreate(false);
+      Alert.alert("Success", `User ${created.user.name || created.user.phoneE164} created successfully.`);
+    } catch (err: any) {
+      Alert.alert("User Creation Failed", err?.message || "Failed to create user on server.");
+    }
   };
 
-  const handleStatusToggle = (targetUser: ManagedUser, nextStatus: "active" | "suspended") => {
+  const handleStatusToggle = async (targetUser: ManagedUser, nextStatus: "active" | "suspended") => {
     if (targetUser.role === "admin" && !isSuperAdmin(data.session?.identifier)) {
       Alert.alert(
         "Permission Denied",
-        "Only the Primary Super Administrator (9835916278) can modify or suspend Administrator accounts."
+        "Only the Primary Super Administrator can modify or suspend Administrator accounts."
       );
       return;
     }
@@ -160,11 +181,23 @@ export default function AdminUsersScreen() {
     const actionLabel = nextStatus === "suspended" ? "Suspend" : "Reactivate";
     const message = `Are you sure you want to ${actionLabel.toLowerCase()} ${targetUser.displayName}?`;
 
+    const executeToggle = async () => {
+      try {
+        await updateUserStatusMutation.mutateAsync({
+          targetUserId: Number(targetUser.id),
+          accountStatus: nextStatus,
+        });
+        await usersQuery.refetch();
+        setEditingUser(null);
+      } catch (err: any) {
+        Alert.alert("Update Failed", err?.message || "Could not update user status.");
+      }
+    };
+
     if (Platform.OS === "web") {
       const confirmed = typeof window !== "undefined" ? window.confirm(message) : true;
       if (confirmed) {
-        updateManagedUser(targetUser.id, { status: nextStatus });
-        setEditingUser(null);
+        await executeToggle();
       }
       return;
     }
@@ -175,18 +208,17 @@ export default function AdminUsersScreen() {
         text: actionLabel,
         style: nextStatus === "suspended" ? "destructive" : "default",
         onPress: () => {
-          updateManagedUser(targetUser.id, { status: nextStatus });
-          setEditingUser(null);
+          executeToggle();
         },
       },
     ]);
   };
 
-  const handleSoftDelete = (targetUser: ManagedUser) => {
+  const handleSoftDelete = async (targetUser: ManagedUser) => {
     if (targetUser.role === "admin" && !isSuperAdmin(data.session?.identifier)) {
       Alert.alert(
         "Permission Denied",
-        "Only the Primary Super Administrator (9835916278) can deactivate or remove Administrator accounts."
+        "Only the Primary Super Administrator can deactivate or remove Administrator accounts."
       );
       return;
     }
@@ -201,10 +233,22 @@ export default function AdminUsersScreen() {
 
     const message = `Deactivate ${targetUser.displayName}'s account? Historical attendance, GPS, and visit audit trails will be preserved.`;
 
+    const executeDelete = async () => {
+      try {
+        await updateUserStatusMutation.mutateAsync({
+          targetUserId: Number(targetUser.id),
+          accountStatus: "removed",
+        });
+        await usersQuery.refetch();
+      } catch (err: any) {
+        Alert.alert("Deactivation Failed", err?.message || "Could not deactivate user.");
+      }
+    };
+
     if (Platform.OS === "web") {
       const confirmed = typeof window !== "undefined" ? window.confirm(message) : true;
       if (confirmed) {
-        removeManagedUser(targetUser.id);
+        await executeDelete();
       }
       return;
     }
@@ -214,7 +258,9 @@ export default function AdminUsersScreen() {
       {
         text: "Deactivate",
         style: "destructive",
-        onPress: () => removeManagedUser(targetUser.id),
+        onPress: () => {
+          executeDelete();
+        },
       },
     ]);
   };
@@ -599,9 +645,27 @@ export default function AdminUsersScreen() {
           <UserEditModal
             managers={managers.map((m) => ({ id: m.id, displayName: m.displayName }))}
             onClose={() => setEditingUser(null)}
-            onSave={(userId, updates) => {
-              updateManagedUser(userId, updates);
-              setEditingUser(null);
+            onSave={async (userId, updates) => {
+              try {
+                if (updates.role || updates.status || updates.managerId !== undefined) {
+                  await updateUserStatusMutation.mutateAsync({
+                    targetUserId: Number(userId),
+                    role: updates.role,
+                    accountStatus: updates.status === "invited" ? undefined : updates.status,
+                    managerId: updates.managerId ? Number(updates.managerId) : null,
+                  });
+                }
+                if (updates.dailyWage !== undefined && !isNaN(Number(updates.dailyWage))) {
+                  await setEmployeeWageMutation.mutateAsync({
+                    targetUserId: Number(userId),
+                    dailyWage: Math.round(Number(updates.dailyWage)),
+                  });
+                }
+                await usersQuery.refetch();
+                setEditingUser(null);
+              } catch (err: any) {
+                Alert.alert("Update Failed", err?.message || "Failed to update user details on server.");
+              }
             }}
             user={editingUser}
             visible={Boolean(editingUser)}

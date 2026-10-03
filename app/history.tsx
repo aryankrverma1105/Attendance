@@ -1,11 +1,13 @@
-import { useState } from "react";
-import { Alert, Image, Linking, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { useRouter } from "expo-router";
+import { useMemo, useState } from "react";
+import { Alert, Linking, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import MaterialIcons from "@expo/vector-icons/MaterialIcons";
 
 import { SectionHeading, StatusChip, Surface } from "@/components/field-ui";
 import { ScreenContainer } from "@/components/screen-container";
+import { AuthImage } from "@/components/auth-image";
 import { formatDay, formatTime, useFieldData } from "@/lib/field-data";
+import { trpc } from "@/lib/trpc";
 
 const openCoordinateMap = (latitude?: number, longitude?: number, label?: string) => {
   if (latitude === undefined || longitude === undefined) {
@@ -24,6 +26,7 @@ const openCoordinateMap = (latitude?: number, longitude?: number, label?: string
 
 export default function AttendanceHistoryScreen() {
   const router = useRouter();
+  const params = useLocalSearchParams<{ targetUserId?: string }>();
   const { data } = useFieldData();
   const [selectedPhoto, setSelectedPhoto] = useState<{
     uri: string;
@@ -33,6 +36,34 @@ export default function AttendanceHistoryScreen() {
     lng?: number;
     accuracy?: number | null;
   } | null>(null);
+
+  const parsedUserId = params.targetUserId ? parseInt(params.targetUserId, 10) : undefined;
+  const historyQuery = trpc.attendance.getHistory.useQuery(
+    { targetUserId: !isNaN(parsedUserId as number) ? parsedUserId : undefined },
+    { refetchInterval: 10000 }
+  );
+
+  const attendanceList = useMemo(() => {
+    if (historyQuery.data && Array.isArray(historyQuery.data)) {
+      return historyQuery.data.map((rec) => ({
+        id: rec.id,
+        employeeId: String(rec.userId),
+        checkInAt: new Date(rec.checkInAt).toISOString(),
+        checkOutAt: rec.checkOutAt ? new Date(rec.checkOutAt).toISOString() : undefined,
+        checkInPhotoUri: rec.checkInPhotoUri || undefined,
+        checkOutPhotoUri: rec.checkOutPhotoUri || undefined,
+        checkInLocation: rec.checkInLat && rec.checkInLng ? {
+          latitude: parseFloat(rec.checkInLat),
+          longitude: parseFloat(rec.checkInLng),
+          accuracy: rec.checkInAccuracy ?? null,
+          capturedAt: new Date(rec.checkInAt).toISOString(),
+        } : undefined,
+        checkOutLocation: undefined,
+        status: rec.status,
+      }));
+    }
+    return data.attendance;
+  }, [historyQuery.data, data.attendance]);
 
   return (
     <ScreenContainer containerClassName="bg-background" className="flex-1">
@@ -47,7 +78,7 @@ export default function AttendanceHistoryScreen() {
           </View>
         </View>
 
-        {data.attendance.length === 0 ? (
+        {attendanceList.length === 0 ? (
           <Surface style={styles.empty}>
             <MaterialIcons color="#D97706" name="history" size={32} />
             <Text style={styles.emptyTitle}>No attendance records logged yet.</Text>
@@ -70,7 +101,7 @@ export default function AttendanceHistoryScreen() {
               title="Verified Shift Records"
             />
             <View style={styles.list}>
-              {data.attendance.map((record) => (
+              {attendanceList.map((record) => (
                 <Surface key={record.id} style={styles.recordCard}>
                   <View style={styles.recordTop}>
                     <View>
@@ -103,7 +134,7 @@ export default function AttendanceHistoryScreen() {
                           }
                           style={styles.photoThumbWrap}
                         >
-                          <Image source={{ uri: record.checkInPhotoUri }} style={styles.photoThumb} />
+                          <AuthImage source={{ uri: record.checkInPhotoUri }} style={styles.photoThumb} />
                           <View style={styles.zoomBadge}>
                             <MaterialIcons color="#FFFFFF" name="zoom-in" size={14} />
                           </View>
@@ -166,7 +197,7 @@ export default function AttendanceHistoryScreen() {
                             }
                             style={styles.photoThumbWrap}
                           >
-                            <Image source={{ uri: record.checkOutPhotoUri }} style={styles.photoThumb} />
+                            <AuthImage source={{ uri: record.checkOutPhotoUri }} style={styles.photoThumb} />
                             <View style={styles.zoomBadge}>
                               <MaterialIcons color="#FFFFFF" name="zoom-in" size={14} />
                             </View>
@@ -243,8 +274,8 @@ export default function AttendanceHistoryScreen() {
               </View>
 
               {selectedPhoto?.uri ? (
-                <Image
-                  resizeMode="contain"
+                <AuthImage
+                  contentFit="contain"
                   source={{ uri: selectedPhoto.uri }}
                   style={styles.modalImage}
                 />

@@ -5,9 +5,9 @@ import * as TaskManager from "expo-task-manager";
 import type { FieldWorkspace, LocationEvidence, RoutePoint } from "@/lib/field-types";
 
 export const BACKGROUND_LOCATION_TASK = "fieldpulse-background-location";
-const FIELD_WORKSPACE_KEY = "fieldpulse.workspace.v1";
+export const ROUTE_POINTS_STORAGE_KEY = "fieldpulse.route_points.v1";
 
-import { enqueueOperation } from "@/lib/offline-sync";
+import { enqueueOperation, flushOfflineQueue } from "@/lib/offline-sync";
 
 export function isValidGpsCoordinate(lat: number, lng: number, accuracy?: number | null): boolean {
   if (isNaN(lat) || isNaN(lng)) return false;
@@ -17,14 +17,20 @@ export function isValidGpsCoordinate(lat: number, lng: number, accuracy?: number
   return true;
 }
 
+export async function getStoredRoutePoints(): Promise<RoutePoint[]> {
+  try {
+    const raw = await AsyncStorage.getItem(ROUTE_POINTS_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
 async function appendBackgroundPoints(locations: Location.LocationObject[]) {
-  const workspaceValue = await AsyncStorage.getItem(FIELD_WORKSPACE_KEY);
-  if (!workspaceValue) return;
-  const workspace = JSON.parse(workspaceValue) as Partial<FieldWorkspace>;
-  const existingPoints = workspace.routePoints ?? [];
   const validLocations = locations.filter((loc) =>
     isValidGpsCoordinate(loc.coords.latitude, loc.coords.longitude, loc.coords.accuracy)
   );
+  if (validLocations.length === 0) return;
 
   const newPoints: RoutePoint[] = validLocations.map((location) => ({
     id: `route-${location.timestamp}-${Math.random().toString(36).slice(2, 7)}`,
@@ -35,13 +41,25 @@ async function appendBackgroundPoints(locations: Location.LocationObject[]) {
     mocked: location.mocked,
   }));
 
-  const nextWorkspace = { ...workspace, routePoints: [...existingPoints, ...newPoints].slice(-1000) };
-  await AsyncStorage.setItem(FIELD_WORKSPACE_KEY, JSON.stringify(nextWorkspace));
+  // Dedicated storage key avoids read-modify-write races with foreground workspace updates
+  try {
+    const rawExisting = await AsyncStorage.getItem(ROUTE_POINTS_STORAGE_KEY);
+    const existingPoints: RoutePoint[] = rawExisting ? JSON.parse(rawExisting) : [];
+    const updated = [...existingPoints, ...newPoints].slice(-1000);
+    await AsyncStorage.setItem(ROUTE_POINTS_STORAGE_KEY, JSON.stringify(updated));
+  } catch (err) {
+    console.warn("[BackgroundLocation] Storage append error:", err);
+  }
 
-  // Also queue for server synchronization
+  // Queue for server synchronization
   for (const point of newPoints) {
     await enqueueOperation("GPS_POINT", point, "low").catch(() => {});
   }
+
+  // Flush queued points when online
+  try {
+    await flushOfflineQueue().catch(() => {});
+  } catch {}
 }
 
 if (!TaskManager.isTaskDefined(BACKGROUND_LOCATION_TASK)) {

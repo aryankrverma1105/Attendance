@@ -55,6 +55,8 @@ describe("Visits Note Update Isolation & Invariant Tests (Real server/db)", () =
     phoneE164: "+919876543210",
     email: null,
     loginMethod: null,
+    passwordHash: null,
+    tokenVersion: 1,
   };
 
   const otherEmployeeUser: User = {

@@ -34,7 +34,8 @@ import { shouldStartTrackingAfterAttendance } from "@/lib/tracking-policy";
 import { shouldEscalateTrackingPermission } from "@/lib/tracking-feedback";
 import { getApiBaseUrl } from "@/constants/oauth";
 import { trpcClient } from "@/lib/trpc";
-import { enqueueOperation } from "@/lib/offline-sync";
+import { enqueueOperation, clearOfflineQueue, setOfflineQueueUserId } from "@/lib/offline-sync";
+import { clearUserInfo, removeSessionToken } from "@/lib/_core/auth";
 
 export {
   calculateEarnings,
@@ -85,6 +86,15 @@ type FieldDataContextValue = {
   data: FieldWorkspace;
   isHydrated: boolean;
   signInToPreview: (identifier: string, role?: FieldSession["role"], displayName?: string) => void;
+  setServerSession: (serverUser: {
+    id: number | string;
+    role: FieldSession["role"] | string;
+    name?: string | null;
+    phoneE164?: string | null;
+    openId?: string;
+    dailyWage?: number | null;
+    managerId?: number | string | null;
+  }) => void;
   signOut: () => void;
   createManagedUser: (input: Omit<ManagedUser, "id" | "accountLinkId" | "status" | "createdAt" | "accessIssuedAt">) => string;
   issueManagedUserAccess: (userId: string) => boolean;
@@ -638,9 +648,52 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
+  const setServerSession = useCallback((serverUser: {
+    id: number | string;
+    role: FieldSession["role"] | string;
+    name?: string | null;
+    phoneE164?: string | null;
+    openId?: string;
+    dailyWage?: number | null;
+    managerId?: number | string | null;
+  }) => {
+    const userIdStr = String(serverUser.id);
+    const userRole: FieldSession["role"] =
+      serverUser.role === "admin" ? "admin" : serverUser.role === "manager" ? "manager" : "employee";
+    const displayName = serverUser.name || serverUser.phoneE164 || `User #${userIdStr}`;
+    const identifier = serverUser.phoneE164 || serverUser.openId || userIdStr;
+
+    // Scope offline queue to this user
+    setOfflineQueueUserId(userIdStr);
+
+    const session: FieldSession = {
+      id: userIdStr,
+      identifier,
+      displayName,
+      role: userRole,
+      isPreview: false,
+      signedInAt: new Date().toISOString(),
+      dailyWage: serverUser.dailyWage ?? 0,
+      managerId: serverUser.managerId ? String(serverUser.managerId) : undefined,
+    };
+
+    setData((current) => {
+      const nextWorkspace: FieldWorkspace = {
+        ...current,
+        session,
+      };
+      persistWorkspaceToStorage(nextWorkspace);
+      return nextWorkspace;
+    });
+  }, []);
+
   const signOut = useCallback(() => {
     stopManagedRouteTracking().catch(() => undefined);
-    setData((current) => ({ ...current, session: null, trackingActive: false, trackingMode: "idle" }));
+    clearOfflineQueue().catch(() => undefined);
+    removeSessionToken().catch(() => undefined);
+    clearUserInfo().catch(() => undefined);
+    AsyncStorage.removeItem(FIELD_WORKSPACE_KEY).catch(() => undefined);
+    setData(emptyWorkspace);
     if (Platform.OS === "web") {
       if (typeof sessionStorage !== "undefined") sessionStorage.removeItem(FIELD_SESSION_KEY);
       return;
@@ -1376,6 +1429,7 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
       data,
       isHydrated,
       signInToPreview,
+      setServerSession,
       signOut,
       createManagedUser,
       issueManagedUserAccess,
@@ -1411,6 +1465,7 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
       isHydrated,
       sendMessage,
       setNotificationsEnabled,
+      setServerSession,
       setTrackingActive,
       startRouteTracking,
       stopRouteTracking,

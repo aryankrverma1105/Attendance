@@ -7,6 +7,7 @@ import { FieldButton, MetricCard, SectionHeading, StatusChip, Surface } from "@/
 import { ScreenContainer } from "@/components/screen-container";
 import { calculateEarnings, calculateWorkedDays, formatCurrency, formatDay, useFieldData } from "@/lib/field-data";
 import { hasPermission } from "@/lib/field-access";
+import { trpc } from "@/lib/trpc";
 
 export default function ReportsScreen() {
   const router = useRouter();
@@ -17,6 +18,19 @@ export default function ReportsScreen() {
   const isAdmin = actorRole === "admin";
   const isManager = actorRole === "manager";
   const isEmployee = actorRole === "employee";
+
+  const adminOverviewQuery = trpc.workforce.getAdminOverview.useQuery(undefined, {
+    enabled: isAdmin,
+    refetchInterval: 15000,
+  });
+  const managerOverviewQuery = trpc.workforce.getManagerOverview.useQuery(undefined, {
+    enabled: isManager,
+    refetchInterval: 15000,
+  });
+  const employeeDashboardQuery = trpc.workforce.getEmployeeDashboard.useQuery(undefined, {
+    enabled: isEmployee,
+    refetchInterval: 15000,
+  });
 
   const now = new Date();
   const currentMonth = now.getMonth() + 1;
@@ -45,6 +59,12 @@ export default function ReportsScreen() {
 
   // Total monthly estimated wages (strictly employees)
   const totalEstimatedPayroll = useMemo(() => {
+    if (adminOverviewQuery.data?.totalMonthlyPayroll !== undefined) {
+      return adminOverviewQuery.data.totalMonthlyPayroll;
+    }
+    if (managerOverviewQuery.data?.teamMonthlyPayroll !== undefined) {
+      return managerOverviewQuery.data.teamMonthlyPayroll;
+    }
     const targetUsers = isAdmin ? data.managedUsers : scopedTeam;
     return targetUsers.reduce((total, user) => {
       if (user.role !== "employee") return total;
@@ -55,7 +75,7 @@ export default function ReportsScreen() {
       const userEarnings = calculateEarnings(workedDays, user.dailyWage || 0);
       return total + userEarnings;
     }, 0);
-  }, [data.managedUsers, scopedTeam, data.attendance, currentMonth, currentYear, isAdmin, actorId]);
+  }, [adminOverviewQuery.data, managerOverviewQuery.data, data.managedUsers, scopedTeam, data.attendance, currentMonth, currentYear, isAdmin, actorId]);
 
   // Task stats
   const completedTasks = scopedTasks.filter((t) => t.status === "COMPLETED").length;

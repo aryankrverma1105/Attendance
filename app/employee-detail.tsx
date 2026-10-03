@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Alert, Image, Linking, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, Linking, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import MaterialIcons from "@expo/vector-icons/MaterialIcons";
 
@@ -12,6 +12,7 @@ import {
   WageEditModal,
 } from "@/components/field-ui";
 import { ScreenContainer } from "@/components/screen-container";
+import { AuthImage } from "@/components/auth-image";
 import {
   calculateEarnings,
   calculateWorkedDays,
@@ -23,6 +24,8 @@ import {
 } from "@/lib/field-data";
 import { canSetEmployeeWage, canViewEmployeeRecord } from "@/lib/field-access";
 import { canAdminManageAccount, canRemoveManagedAccount } from "@/lib/account-lifecycle";
+import type { FieldRole, ManagedUser } from "@/lib/field-types";
+import { trpc } from "@/lib/trpc";
 
 const lifecycleCopy = {
   "account-created": "Account invitation created",
@@ -59,10 +62,43 @@ export default function EmployeeDetailScreen() {
     accuracy?: number | null;
   } | null>(null);
 
-  const user = data.managedUsers.find((item) => item.id === id);
-  const isCurrentWorkspaceUser = data.session?.id === id;
   const actorRole = data.session?.role;
   const actorId = data.session?.id;
+
+  const parsedUserId = id ? parseInt(id, 10) : undefined;
+  const historyQuery = trpc.attendance.getHistory.useQuery(
+    { targetUserId: !isNaN(parsedUserId as number) ? parsedUserId : undefined },
+    { refetchInterval: 10000 }
+  );
+  const usersQuery = trpc.workforce.listUsers.useQuery(undefined, {
+    refetchInterval: 10000,
+  });
+  const setEmployeeWageMutation = trpc.workforce.setEmployeeWage.useMutation();
+
+  const user = useMemo(() => {
+    if (usersQuery.data && Array.isArray(usersQuery.data)) {
+      const found = usersQuery.data.find((u) => String(u.id) === id || u.phoneE164 === id || u.openId === id);
+      if (found) {
+        const role: FieldRole = found.role === "admin" ? "admin" : found.role === "manager" ? "manager" : "employee";
+        const status = (found.accountStatus === "removed" ? "suspended" : found.accountStatus) as "active" | "invited" | "suspended";
+        return {
+          id: String(found.id),
+          accountLinkId: `account-${found.id}`,
+          displayName: found.name || found.phoneE164 || `User #${found.id}`,
+          identifier: found.phoneE164 || found.openId || String(found.id),
+          role,
+          status,
+          department: undefined,
+          dailyWage: found.dailyWage ?? 0,
+          managerId: found.managerId ? String(found.managerId) : undefined,
+          createdAt: new Date(found.createdAt).toISOString(),
+        } as ManagedUser;
+      }
+    }
+    return data.managedUsers.find((item) => item.id === id);
+  }, [usersQuery.data, data.managedUsers, id]);
+
+  const isCurrentWorkspaceUser = data.session?.id === id;
 
   const canView = canViewEmployeeRecord({
     viewerRole: actorRole,
@@ -97,9 +133,30 @@ export default function EmployeeDetailScreen() {
   const currentMonth = now.getMonth() + 1;
   const currentYear = now.getFullYear();
 
-  const attendance = data.attendance.filter(
-    (record) => record.employeeId === id || (isCurrentWorkspaceUser && !record.employeeId)
-  );
+  const attendance = useMemo(() => {
+    if (historyQuery.data && Array.isArray(historyQuery.data)) {
+      return historyQuery.data.map((rec) => ({
+        id: rec.id,
+        employeeId: String(rec.userId),
+        checkInAt: new Date(rec.checkInAt).toISOString(),
+        checkOutAt: rec.checkOutAt ? new Date(rec.checkOutAt).toISOString() : undefined,
+        checkInPhotoUri: rec.checkInPhotoUri || undefined,
+        checkOutPhotoUri: rec.checkOutPhotoUri || undefined,
+        checkInLocation: rec.checkInLat && rec.checkInLng ? {
+          latitude: parseFloat(rec.checkInLat),
+          longitude: parseFloat(rec.checkInLng),
+          accuracy: rec.checkInAccuracy ?? null,
+          capturedAt: new Date(rec.checkInAt).toISOString(),
+        } : undefined,
+        checkOutLocation: undefined,
+        status: rec.status,
+        syncState: "synced" as const,
+      }));
+    }
+    return data.attendance.filter(
+      (record) => record.employeeId === id || (isCurrentWorkspaceUser && !record.employeeId)
+    );
+  }, [historyQuery.data, data.attendance, id, isCurrentWorkspaceUser]);
   const visits = data.visits.filter(
     (visit) => visit.employeeId === id || (isCurrentWorkspaceUser && !visit.employeeId)
   );
@@ -387,7 +444,7 @@ export default function EmployeeDetailScreen() {
                         }
                         style={styles.photoThumbWrap}
                       >
-                        <Image source={{ uri: record.checkInPhotoUri }} style={styles.photoThumb} />
+                        <AuthImage source={{ uri: record.checkInPhotoUri }} style={styles.photoThumb} />
                         <View style={styles.zoomBadge}>
                           <MaterialIcons color="#FFFFFF" name="zoom-in" size={14} />
                         </View>
@@ -450,7 +507,7 @@ export default function EmployeeDetailScreen() {
                           }
                           style={styles.photoThumbWrap}
                         >
-                          <Image source={{ uri: record.checkOutPhotoUri }} style={styles.photoThumb} />
+                          <AuthImage source={{ uri: record.checkOutPhotoUri }} style={styles.photoThumb} />
                           <View style={styles.zoomBadge}>
                             <MaterialIcons color="#FFFFFF" name="zoom-in" size={14} />
                           </View>
@@ -617,9 +674,21 @@ export default function EmployeeDetailScreen() {
             currentWage={user.dailyWage || 0}
             employeeName={user.displayName}
             onClose={() => setShowWageModal(false)}
-            onSave={(newWage) => {
-              updateEmployeeWage(user.id, newWage);
-              setShowWageModal(false);
+            onSave={async (newWage) => {
+              try {
+                if (user?.id) {
+                  await setEmployeeWageMutation.mutateAsync({
+                    targetUserId: Number(user.id),
+                    dailyWage: Math.round(Number(newWage)),
+                  });
+                  await usersQuery.refetch();
+                }
+                updateEmployeeWage(user.id, newWage);
+                setShowWageModal(false);
+                Alert.alert("Success", "Daily wage updated successfully.");
+              } catch (err: any) {
+                Alert.alert("Wage Update Failed", err?.message || "Failed to update daily wage on server.");
+              }
             }}
             visible={showWageModal}
           />
@@ -647,8 +716,8 @@ export default function EmployeeDetailScreen() {
               </View>
 
               {selectedPhoto?.uri ? (
-                <Image
-                  resizeMode="contain"
+                <AuthImage
+                  contentFit="contain"
                   source={{ uri: selectedPhoto.uri }}
                   style={styles.modalImage}
                 />

@@ -39,6 +39,7 @@ export default function VisitsScreen() {
           meetingOutcome: lv.meetingOutcome || null,
           notes: lv.notes || null,
           followUpDate: lv.followUpDate || null,
+          operationId: null,
           createdAt: new Date(),
           updatedAt: new Date(),
           customerName: data.customers.find((c) => c.id === lv.customerId)?.name || "Customer",

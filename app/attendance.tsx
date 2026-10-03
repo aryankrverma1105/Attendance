@@ -27,13 +27,13 @@ export default function AttendanceCaptureScreen() {
     try {
       const locationPermission = await Location.requestForegroundPermissionsAsync();
       if (locationPermission.status !== "granted") {
-        Alert.alert("Location required", "Please enable GPS location to verify attendance.");
+        Alert.alert("Location Required", "Please enable GPS location permissions to verify attendance.");
         return null;
       }
 
       const servicesEnabled = await Location.hasServicesEnabledAsync();
       if (!servicesEnabled) {
-        Alert.alert("Location unavailable", "Please turn on GPS location on your device.");
+        Alert.alert("Location Unavailable", "Please turn on GPS location on your device.");
         return null;
       }
 
@@ -41,15 +41,14 @@ export default function AttendanceCaptureScreen() {
         await Location.enableNetworkProviderAsync().catch(() => undefined);
       }
 
-      setMessage("Acquiring GPS location…");
+      setMessage("Acquiring high-accuracy GPS fix…");
 
-      // Try balanced GPS with a 3.5s timeout race, fallback to last known immediately
       const fetchCurrent = Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.Balanced,
+        accuracy: Location.Accuracy.High,
         mayShowUserSettingsDialog: true,
       });
 
-      const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 3500));
+      const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 8000));
       let result: Location.LocationObject | null = await Promise.race([fetchCurrent, timeoutPromise]);
 
       if (!result) {
@@ -57,18 +56,37 @@ export default function AttendanceCaptureScreen() {
       }
 
       if (!result) {
-        result = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Lowest }).catch(() => null);
+        Alert.alert(
+          "GPS Fix Unavailable",
+          "Could not acquire a GPS fix. Please ensure you have GPS active and try again."
+        );
+        return null;
       }
 
-      if (!result) {
-        // Fallback default coordinates if sensor completely blocked
-        return {
-          latitude: 28.6139,
-          longitude: 77.2090,
-          accuracy: 15,
-          capturedAt: new Date().toISOString(),
-          mocked: false,
-        };
+      if (result.mocked) {
+        Alert.alert(
+          "Mocked Location Detected",
+          "Mocked or simulated GPS locations are strictly prohibited for attendance verification."
+        );
+        return null;
+      }
+
+      const fixAgeMs = Date.now() - result.timestamp;
+      if (fixAgeMs > 2 * 60 * 1000) {
+        Alert.alert(
+          "Stale GPS Fix",
+          "GPS location is older than 2 minutes. Please wait for a fresh satellite lock and try again."
+        );
+        return null;
+      }
+
+      const accuracy = result.coords.accuracy;
+      if (accuracy === null || accuracy === undefined || accuracy > 100) {
+        Alert.alert(
+          "Low GPS Accuracy",
+          `Current GPS accuracy (±${Math.round(accuracy || 999)}m) does not meet requirement (<=100m). Please step into the open and try again.`
+        );
+        return null;
       }
 
       return {
@@ -79,24 +97,12 @@ export default function AttendanceCaptureScreen() {
         mocked: result.mocked,
       };
     } catch (locErr) {
-      console.warn("[GPS] Fallback on error:", locErr);
-      const fallback = await Location.getLastKnownPositionAsync().catch(() => null);
-      if (fallback) {
-        return {
-          latitude: fallback.coords.latitude,
-          longitude: fallback.coords.longitude,
-          accuracy: fallback.coords.accuracy,
-          capturedAt: new Date(fallback.timestamp).toISOString(),
-          mocked: fallback.mocked,
-        };
-      }
-      return {
-        latitude: 28.6139,
-        longitude: 77.2090,
-        accuracy: 25,
-        capturedAt: new Date().toISOString(),
-        mocked: false,
-      };
+      console.warn("[GPS] Location error:", locErr);
+      Alert.alert(
+        "Location Error",
+        "Failed to retrieve verified GPS location. Please ensure location services are enabled."
+      );
+      return null;
     }
   };
 
@@ -116,33 +122,59 @@ export default function AttendanceCaptureScreen() {
       const location = await getVerifiedLocation();
       if (!location) return;
 
-      let finalPhotoUri = photo.uri;
+      let finalPhotoUri = "";
 
-      // Upload directly to VM instance storage
+      // Upload directly to server storage using Authorization header and getApiBaseUrl
       if (photo.base64) {
         try {
-          const apiBase = process.env.EXPO_PUBLIC_API_BASE_URL || "";
+          const { getApiBaseUrl } = await import("@/constants/oauth");
+          const { getSessionToken } = await import("@/lib/_core/auth");
+          const apiBase = getApiBaseUrl();
+          const token = await getSessionToken();
           if (apiBase) {
             const response = await fetch(`${apiBase}/api/upload-selfie`, {
               method: "POST",
-              headers: { "Content-Type": "application/json" },
+              headers: {
+                "Content-Type": "application/json",
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+              },
               body: JSON.stringify({
                 base64: photo.base64,
                 action,
-                employeeId: data.session?.id,
               }),
             });
             const resData = await response.json();
             if (resData?.url) {
-              finalPhotoUri = resData.url.startsWith("http") ? resData.url : `${apiBase}${resData.url}`;
+              finalPhotoUri = resData.url;
             }
-          } else {
-            finalPhotoUri = `data:image/jpeg;base64,${photo.base64}`;
           }
         } catch (uploadErr) {
-          console.warn("[Selfie] VM upload fallback to data URI:", uploadErr);
-          finalPhotoUri = `data:image/jpeg;base64,${photo.base64}`;
+          console.warn("[Selfie] Direct upload failed, queueing offline operation:", uploadErr);
         }
+      }
+
+      if (!finalPhotoUri && photo.base64) {
+        // Queue upload as its own operation, never send file:// or data: URI to attendance mutation
+        const { enqueueOperation } = await import("@/lib/offline-sync");
+        const clientCapturedAt = new Date().toISOString();
+        await enqueueOperation("UPLOAD_SELFIE", {
+          base64: photo.base64,
+          action,
+          nextAction: action === "check-in" ? "ATTENDANCE_CHECK_IN" : "ATTENDANCE_CHECK_OUT",
+          attendancePayload: action === "check-in" ? {
+            checkInLat: location.latitude ? String(location.latitude) : undefined,
+            checkInLng: location.longitude ? String(location.longitude) : undefined,
+            checkInAccuracy: location.accuracy ? Math.round(location.accuracy) : undefined,
+            clientCheckInAt: location.capturedAt || clientCapturedAt,
+            isMocked: location.mocked,
+          } : {
+            clientCheckOutAt: clientCapturedAt,
+          },
+        }, "high");
+
+        setMessage(action === "check-in" ? "Check-in saved offline! Will sync automatically." : "Check-out saved offline! Will sync automatically.");
+        setTimeout(() => router.replace("/(tabs)"), 800);
+        return;
       }
 
       setMessage(action === "check-in" ? "Check-in verified! Redirecting…" : "Check-out saved! Redirecting…");

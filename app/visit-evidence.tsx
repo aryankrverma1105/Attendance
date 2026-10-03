@@ -23,28 +23,99 @@ export default function VisitEvidenceScreen() {
   const getLocation = async (): Promise<LocationEvidence | null> => {
     const permissionResult = await Location.requestForegroundPermissionsAsync();
     if (permissionResult.status !== "granted") {
-      Alert.alert("Location required", "GPS evidence is required to verify this customer visit.");
+      Alert.alert("Location Required", "GPS evidence is required to verify this customer visit.");
       return null;
     }
     if (!(await Location.hasServicesEnabledAsync())) {
-      Alert.alert("Enable location", "Turn on device location services and try again.");
+      Alert.alert("Enable Location", "Turn on device location services and try again.");
       return null;
     }
     if (Platform.OS === "android") await Location.enableNetworkProviderAsync().catch(() => undefined);
-    const value = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Highest, mayShowUserSettingsDialog: true });
-    return { latitude: value.coords.latitude, longitude: value.coords.longitude, accuracy: value.coords.accuracy, capturedAt: new Date(value.timestamp).toISOString(), mocked: value.mocked };
+    const value = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High, mayShowUserSettingsDialog: true });
+
+    if (value.mocked) {
+      Alert.alert("Mocked Location Detected", "Mocked GPS locations are not allowed for visit verification.");
+      return null;
+    }
+    const ageMs = Date.now() - value.timestamp;
+    if (ageMs > 2 * 60 * 1000) {
+      Alert.alert("Stale GPS Fix", "GPS fix is older than 2 minutes. Please wait for a fresh lock and try again.");
+      return null;
+    }
+    if (value.coords.accuracy === null || value.coords.accuracy === undefined || value.coords.accuracy > 100) {
+      Alert.alert("Low GPS Accuracy", `GPS accuracy (±${Math.round(value.coords.accuracy || 999)}m) must be <= 100m.`);
+      return null;
+    }
+
+    return {
+      latitude: value.coords.latitude,
+      longitude: value.coords.longitude,
+      accuracy: value.coords.accuracy,
+      capturedAt: new Date(value.timestamp).toISOString(),
+      mocked: value.mocked,
+    };
   };
 
   const capture = async () => {
     if (!cameraRef.current || !ready) return;
     try {
       setCapturing(true);
-      const photo = await cameraRef.current.takePictureAsync({ quality: 0.7, base64: false, skipProcessing: false });
+      const photo = await cameraRef.current.takePictureAsync({ quality: 0.3, base64: true, skipProcessing: false });
       if (!photo?.uri) throw new Error("A usable photo could not be captured.");
       const location = await getLocation();
       if (!location) return;
-      captureVisitEvidence({ visitId: id, action: mode, photoUri: photo.uri, location });
-      Alert.alert(mode === "check-in" ? "Customer check-in saved" : "Customer check-out saved", "Your photo and GPS evidence were saved locally and added to the secure sync queue.", [{ text: "Continue", onPress: () => router.replace({ pathname: "/visit-detail", params: { id } }) }]);
+
+      let serverPhotoUrl = "";
+      if (photo.base64) {
+        try {
+          const { getApiBaseUrl } = await import("@/constants/oauth");
+          const { getSessionToken } = await import("@/lib/_core/auth");
+          const apiBase = getApiBaseUrl();
+          const token = await getSessionToken();
+          if (apiBase) {
+            const res = await fetch(`${apiBase}/api/upload-selfie`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+              },
+              body: JSON.stringify({
+                base64: photo.base64,
+                action: "visit",
+              }),
+            });
+            const data = await res.json().catch(() => null);
+            if (data?.url) {
+              serverPhotoUrl = data.url;
+            }
+          }
+        } catch (uploadErr) {
+          console.warn("[VisitEvidence] Upload failed, queueing offline:", uploadErr);
+        }
+      }
+
+      if (!serverPhotoUrl && photo.base64) {
+        const { enqueueOperation } = await import("@/lib/offline-sync");
+        await enqueueOperation("UPLOAD_SELFIE", {
+          base64: photo.base64,
+          action: "visit",
+          nextAction: "VISIT_EVIDENCE",
+          visitPayload: {
+            visitId: id,
+            latitude: location.latitude,
+            longitude: location.longitude,
+            accuracy: location.accuracy ? Math.round(location.accuracy) : undefined,
+          },
+        }, "high");
+      } else if (serverPhotoUrl) {
+        captureVisitEvidence({ visitId: id, action: mode, photoUri: serverPhotoUrl, location });
+      }
+
+      Alert.alert(
+        mode === "check-in" ? "Customer check-in saved" : "Customer check-out saved",
+        "Your photo and GPS evidence were saved and synchronized securely.",
+        [{ text: "Continue", onPress: () => router.replace({ pathname: "/visit-detail", params: { id } }) }]
+      );
     } catch (error) {
       Alert.alert("Evidence capture failed", error instanceof Error ? error.message : "Try again with a strong GPS signal.");
     } finally {

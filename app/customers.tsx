@@ -55,6 +55,7 @@ export default function CustomersScreen() {
           longitude: localCust.longitude ? String(localCust.longitude) : null,
           notes: null,
           createdByUserId: null,
+          operationId: null,
           status: "active" as const,
           createdAt: new Date(localCust.createdAt),
           updatedAt: new Date(localCust.createdAt),

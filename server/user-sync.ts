@@ -1,126 +1,130 @@
-import fs from "fs";
-import path from "path";
 import type { Express, Request, Response } from "express";
+import crypto from "crypto";
+import bcrypt from "bcryptjs";
+import rateLimit from "express-rate-limit";
 import { getDb } from "./db";
 import { users } from "../drizzle/schema";
 import { eq, or } from "drizzle-orm";
 import { sdk } from "./_core/sdk";
 
-export interface SyncUser {
-  id: string;
-  accountLinkId?: string;
-  displayName: string;
-  identifier: string;
-  role: "admin" | "manager" | "employee";
-  status: "active" | "suspended" | "removed";
-  dailyWage?: number;
-  department?: string;
-  managerId?: string;
-  password?: string;
-  createdAt?: string;
+export async function verifyPasswordHash(password: string, storedHash: string): Promise<boolean> {
+  if (!storedHash || !password) return false;
+  if (storedHash.startsWith("$2a$") || storedHash.startsWith("$2b$") || storedHash.startsWith("$2y$")) {
+    return await bcrypt.compare(password, storedHash);
+  }
+  if (storedHash.startsWith("scrypt$") || storedHash.startsWith("scrypt:")) {
+    const parts = storedHash.includes("$") ? storedHash.split("$") : storedHash.split(":");
+    if (parts.length >= 3) {
+      const salt = parts[1];
+      const originalHash = parts[2];
+      const derivedKey = crypto.scryptSync(password, salt, 64).toString("hex");
+      if (derivedKey.length === originalHash.length) {
+        return crypto.timingSafeEqual(Buffer.from(derivedKey, "hex"), Buffer.from(originalHash, "hex"));
+      }
+    }
+  }
+  try {
+    return await bcrypt.compare(password, storedHash);
+  } catch {
+    return false;
+  }
 }
 
-const STORAGE_DIR = path.join(process.cwd(), "uploads");
-const USERS_FILE = path.join(STORAGE_DIR, "managed-users.json");
-
-// Default initial users
-const DEFAULT_USERS: SyncUser[] = [
-  {
-    id: "admin-sologix-primary",
-    accountLinkId: "account-admin-sologix",
-    displayName: "Aryan Kumar Verma",
-    identifier: "+919835916278",
-    role: "admin",
-    status: "active",
-    dailyWage: 0,
-    createdAt: new Date().toISOString(),
-  },
-];
+export function hashPasswordScrypt(password: string): string {
+  const salt = crypto.randomBytes(16).toString("hex");
+  const derivedKey = crypto.scryptSync(password, salt, 64).toString("hex");
+  return `scrypt$${salt}$${derivedKey}`;
+}
 
 function normalizePhone(p: string): string {
   const digits = (p || "").replace(/[^0-9]/g, "");
   return digits.length >= 10 ? digits.slice(-10) : digits;
 }
 
-function loadDiskUsers(): SyncUser[] {
-  try {
-    if (!fs.existsSync(STORAGE_DIR)) {
-      fs.mkdirSync(STORAGE_DIR, { recursive: true });
-    }
-    if (fs.existsSync(USERS_FILE)) {
-      const data = fs.readFileSync(USERS_FILE, "utf-8");
-      const parsed = JSON.parse(data) as SyncUser[];
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        // Ensure primary admin is always present
-        const hasPrimary = parsed.some((u) => u.identifier.includes("9835916278"));
-        if (!hasPrimary) {
-          parsed.unshift(DEFAULT_USERS[0]);
-        }
-        return parsed;
-      }
-    }
-  } catch (err) {
-    console.error("[UserSync] Error reading disk users:", err);
-  }
-  return [...DEFAULT_USERS];
+function formatE164(p: string): string {
+  let clean = (p || "").trim();
+  const digits = clean.replace(/[^0-9]/g, "");
+  if (digits.length === 10) return `+91${digits}`;
+  if (!clean.startsWith("+") && digits.length > 0) return `+${digits}`;
+  return clean;
 }
 
-function saveDiskUsers(userList: SyncUser[]) {
-  try {
-    if (!fs.existsSync(STORAGE_DIR)) {
-      fs.mkdirSync(STORAGE_DIR, { recursive: true });
-    }
-    fs.writeFileSync(USERS_FILE, JSON.stringify(userList, null, 2), "utf-8");
-  } catch (err) {
-    console.error("[UserSync] Error writing disk users:", err);
-  }
-}
+/**
+ * Strict Rate Limiter for Password Login:
+ * 5 attempts per 15 minutes scoped per IP + identifier.
+ */
+export const passwordLoginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  validate: { keyGeneratorIpFallback: false },
+  keyGenerator: (req: Request) => {
+    const rawIdentifier = String(req.body?.identifier || "").trim().toLowerCase();
+    const ip = req.ip || (req.headers["x-forwarded-for"] as string) || req.socket.remoteAddress || "unknown_ip";
+    return `${ip}_${rawIdentifier}`;
+  },
+  handler: (_req: Request, res: Response) => {
+    res.status(429).json({
+      success: false,
+      error: "Too many login attempts. Please try again after 15 minutes.",
+    });
+  },
+});
 
 export function initUserSync(app: Express) {
-  // Ensure storage exists on startup
-  const initial = loadDiskUsers();
-  saveDiskUsers(initial);
-
   /**
    * GET /api/users
-   * Return all managed users across the entire organization.
-   * Strip sensitive fields (passwords) and prioritize the database.
+   * Return all managed users across the organization from MySQL only.
+   * Access restricted strictly to administrators.
+   * Passwords and password hashes are NEVER returned.
    */
-  app.get("/api/users", async (_req: Request, res: Response) => {
+  app.get("/api/users", async (req: Request, res: Response) => {
     try {
-      const diskUsers = loadDiskUsers();
-      const sanitizedDiskUsers = diskUsers.map((u) => {
-        const { password, ...safe } = u;
-        return safe;
-      });
-
-      // Supplement with database users
-      try {
-        const db = await getDb();
-        if (db) {
-          const dbUsers = await db.select().from(users);
-          for (const dbu of dbUsers) {
-            const dbuDigits = normalizePhone(dbu.phoneE164 || "");
-            const exists = sanitizedDiskUsers.find((du) => normalizePhone(du.identifier) === dbuDigits);
-            if (!exists && dbu.phoneE164) {
-              sanitizedDiskUsers.push({
-                id: `db-${dbu.id}`,
-                displayName: dbu.name || "Employee",
-                identifier: dbu.phoneE164,
-                role: dbu.role === "admin" ? "admin" : dbu.role === "manager" ? "manager" : "employee",
-                status: dbu.accountStatus === "suspended" ? "suspended" : "active",
-                dailyWage: dbu.dailyWage || 0,
-                createdAt: dbu.createdAt?.toISOString() || new Date().toISOString(),
-              });
-            }
-          }
-        }
-      } catch (dbErr) {
-        // DB optional; fallback handles persistence
+      const authUser = await sdk.authenticateRequest(req);
+      if (authUser.role !== "admin") {
+        return res.status(403).json({ success: false, error: "Only administrators can access user roster" });
       }
 
-      res.json({ success: true, users: sanitizedDiskUsers });
-    } catch (error) {
+      const db = await getDb();
+      if (!db) {
+        return res.status(503).json({ success: false, error: "Database unavailable" });
+      }
+
+      const dbUsers = await db
+        .select({
+          id: users.id,
+          openId: users.openId,
+          firebaseUid: users.firebaseUid,
+          phoneE164: users.phoneE164,
+          name: users.name,
+          email: users.email,
+          role: users.role,
+          accountStatus: users.accountStatus,
+          dailyWage: users.dailyWage,
+          managerId: users.managerId,
+          createdAt: users.createdAt,
+          updatedAt: users.updatedAt,
+          lastSignedIn: users.lastSignedIn,
+        })
+        .from(users);
+
+      const sanitized = dbUsers.map((u) => ({
+        id: String(u.id),
+        displayName: u.name || "Employee",
+        identifier: u.phoneE164 || u.openId,
+        role: u.role,
+        status: u.accountStatus,
+        dailyWage: u.dailyWage,
+        managerId: u.managerId ? String(u.managerId) : undefined,
+        createdAt: u.createdAt.toISOString(),
+      }));
+
+      res.json({ success: true, users: sanitized });
+    } catch (error: any) {
+      if (error?.status === 401 || error?.status === 403 || error?.statusCode === 401 || error?.statusCode === 403) {
+        return res.status(error.status || error.statusCode || 401).json({ success: false, error: error.message || "Authentication required" });
+      }
       console.error("[UserSync] Failed to list users:", error);
       res.status(500).json({ success: false, error: "Failed to list users" });
     }
@@ -128,62 +132,73 @@ export function initUserSync(app: Express) {
 
   /**
    * GET /api/users/check?phone=...
-   * Check user role and profile by phone number or identifier
+   * Look up user by phone or openId from MySQL only.
+   * Requires Admin authorization. Passwords NEVER returned.
    */
   app.get("/api/users/check", async (req: Request, res: Response) => {
     try {
+      const authUser = await sdk.authenticateRequest(req);
+      if (authUser.role !== "admin") {
+        return res.status(403).json({ success: false, error: "Only administrators can inspect user accounts" });
+      }
+
       const queryPhone = String(req.query.phone || req.query.identifier || "").trim();
       if (!queryPhone) {
         return res.status(400).json({ success: false, error: "phone is required" });
       }
 
-      const qDigits = normalizePhone(queryPhone);
-      const qLower = queryPhone.toLowerCase();
-      const diskUsers = loadDiskUsers();
+      const db = await getDb();
+      if (!db) return res.status(503).json({ success: false, error: "Database unavailable" });
 
-      const matched = diskUsers.find((u) => {
-        const uDigits = normalizePhone(u.identifier);
-        const uName = (u.displayName || "").toLowerCase().trim();
-        return (
-          (qDigits && uDigits && qDigits === uDigits) ||
-          u.identifier.toLowerCase() === qLower ||
-          uName === qLower
-        );
-      });
+      const e164 = formatE164(queryPhone);
+      const digits = normalizePhone(queryPhone);
 
-      if (matched) {
-        const { password, ...safeMatched } = matched;
-        return res.json({ success: true, found: true, user: safeMatched });
+      const matched = await db
+        .select({
+          id: users.id,
+          openId: users.openId,
+          phoneE164: users.phoneE164,
+          name: users.name,
+          email: users.email,
+          role: users.role,
+          accountStatus: users.accountStatus,
+          dailyWage: users.dailyWage,
+          managerId: users.managerId,
+          createdAt: users.createdAt,
+        })
+        .from(users)
+        .where(
+          or(
+            eq(users.phoneE164, e164),
+            eq(users.phoneE164, `+91${digits}`),
+            eq(users.openId, queryPhone),
+            eq(users.email, queryPhone)
+          )
+        )
+        .limit(1);
+
+      if (matched.length > 0) {
+        const u = matched[0];
+        return res.json({
+          success: true,
+          found: true,
+          user: {
+            id: String(u.id),
+            displayName: u.name || "Employee",
+            identifier: u.phoneE164 || u.openId,
+            role: u.role,
+            status: u.accountStatus,
+            dailyWage: u.dailyWage,
+            createdAt: u.createdAt.toISOString(),
+          },
+        });
       }
 
-      // Check DB if not found in disk
-      try {
-        const db = await getDb();
-        if (db && qDigits) {
-          const dbMatch = await db
-            .select()
-            .from(users)
-            .where(or(eq(users.phoneE164, `+91${qDigits}`), eq(users.phoneE164, queryPhone)))
-            .limit(1);
-
-          if (dbMatch.length > 0) {
-            const u = dbMatch[0];
-            const mappedUser: SyncUser = {
-              id: `db-${u.id}`,
-              displayName: u.name || "Employee",
-              identifier: u.phoneE164 || queryPhone,
-              role: u.role === "admin" ? "admin" : u.role === "manager" ? "manager" : "employee",
-              status: u.accountStatus === "suspended" ? "suspended" : "active",
-              dailyWage: u.dailyWage || 0,
-              createdAt: u.createdAt?.toISOString() || new Date().toISOString(),
-            };
-            return res.json({ success: true, found: true, user: mappedUser });
-          }
-        }
-      } catch {}
-
       return res.json({ success: true, found: false });
-    } catch (error) {
+    } catch (error: any) {
+      if (error?.status === 401 || error?.status === 403 || error?.statusCode === 401 || error?.statusCode === 403) {
+        return res.status(error.status || error.statusCode || 401).json({ success: false, error: error.message || "Authentication required" });
+      }
       console.error("[UserSync] Failed to check user:", error);
       res.status(500).json({ success: false, error: "Failed to check user" });
     }
@@ -191,106 +206,94 @@ export function initUserSync(app: Express) {
 
   /**
    * POST /api/auth/password-login
-   * Validates phone + password credentials and issues a signed JWT session token.
+   * Validates credentials against MySQL users.passwordHash ONLY.
+   * Checks accountStatus === "active", signs JWT with REAL users.openId.
+   * Rate limited: 5 attempts per 15 minutes per IP + identifier.
    */
-  app.post("/api/auth/password-login", async (req: Request, res: Response) => {
+  app.post("/api/auth/password-login", passwordLoginLimiter, async (req: Request, res: Response) => {
     try {
       const { identifier, password } = req.body || {};
-      if (!identifier) {
+      if (!identifier || typeof identifier !== "string" || !identifier.trim()) {
         return res.status(400).json({ success: false, error: "Identifier is required" });
       }
+      if (!password || typeof password !== "string" || !password.trim()) {
+        return res.status(400).json({ success: false, error: "Password is required" });
+      }
 
-      const qPhone = String(identifier).trim();
-      const qDigits = normalizePhone(qPhone);
-      const isSuperAdmin = qDigits.includes("9835916278") || qPhone.toLowerCase().includes("admin");
+      const db = await getDb();
+      if (!db) {
+        return res.status(503).json({ success: false, error: "Database unavailable" });
+      }
 
-      if (isSuperAdmin) {
-        const expectedPass = process.env.EXPO_PUBLIC_ADMIN_PASSWORD || process.env.ADMIN_PASSWORD || "Sologix12345";
-        if (password && password !== expectedPass && password !== "Sologix12345") {
-          return res.status(401).json({ success: false, error: "Invalid admin password" });
-        }
-        const openId = `admin_${qDigits || "primary"}`;
-        const token = await sdk.createSessionToken(openId, {
-          name: "Aryan Kumar Verma",
-        });
-        return res.json({
-          success: true,
-          token,
-          user: {
-            id: 1,
-            openId,
-            phoneE164: "+919835916278",
-            name: "Aryan Kumar Verma",
-            role: "admin",
-            accountStatus: "active",
-          },
+      const qIdentifier = identifier.trim();
+      const e164 = formatE164(qIdentifier);
+      const digits = normalizePhone(qIdentifier);
+
+      const dbMatch = await db
+        .select()
+        .from(users)
+        .where(
+          or(
+            eq(users.phoneE164, e164),
+            eq(users.phoneE164, `+91${digits}`),
+            eq(users.phoneE164, qIdentifier),
+            eq(users.openId, qIdentifier),
+            eq(users.email, qIdentifier)
+          )
+        )
+        .limit(1);
+
+      if (dbMatch.length === 0) {
+        return res.status(401).json({ success: false, error: "Invalid credentials" });
+      }
+
+      const targetUser = dbMatch[0];
+
+      // Enforce active account status
+      if (targetUser.accountStatus !== "active") {
+        return res.status(403).json({
+          success: false,
+          error: "Account is not active or has been suspended by an administrator",
         });
       }
 
-      // Check managed users on disk
-      const diskUsers = loadDiskUsers();
-      const matched = diskUsers.find((u) => {
-        const uDigits = normalizePhone(u.identifier);
-        return (qDigits && uDigits && qDigits === uDigits) || u.identifier.toLowerCase() === qPhone.toLowerCase();
+      // Enforce password hash presence
+      if (!targetUser.passwordHash) {
+        return res.status(401).json({ success: false, error: "Invalid credentials" });
+      }
+
+      // Verify scrypt/bcrypt hash
+      const isPasswordValid = await verifyPasswordHash(password, targetUser.passwordHash);
+      if (!isPasswordValid) {
+        return res.status(401).json({ success: false, error: "Invalid credentials" });
+      }
+
+      // Update lastSignedIn
+      await db
+        .update(users)
+        .set({ lastSignedIn: new Date() })
+        .where(eq(users.id, targetUser.id));
+
+      // Sign JWT with REAL openId and tokenVersion
+      const token = await sdk.createSessionToken(targetUser.openId, {
+        name: targetUser.name || "User",
+        tokenVersion: targetUser.tokenVersion ?? 1,
       });
 
-      if (matched) {
-        if (matched.password && matched.password.trim() && password && password !== matched.password.trim()) {
-          return res.status(401).json({ success: false, error: "Invalid password for account" });
-        }
-        const openId = `user_${normalizePhone(matched.identifier)}`;
-        const token = await sdk.createSessionToken(openId, {
-          name: matched.displayName,
-        });
-        return res.json({
-          success: true,
-          token,
-          user: {
-            id: matched.id,
-            openId,
-            phoneE164: matched.identifier,
-            name: matched.displayName,
-            role: matched.role,
-            accountStatus: matched.status,
-          },
-        });
-      }
-
-      // Check DB users
-      try {
-        const db = await getDb();
-        if (db && qDigits) {
-          const dbMatch = await db
-            .select()
-            .from(users)
-            .where(or(eq(users.phoneE164, `+91${qDigits}`), eq(users.phoneE164, qPhone)))
-            .limit(1);
-
-          if (dbMatch.length > 0) {
-            const u = dbMatch[0];
-            const openId = u.openId || `user_${normalizePhone(u.phoneE164 || qDigits)}`;
-            const token = await sdk.createSessionToken(openId, {
-              name: u.name || "User",
-            });
-            return res.json({
-              success: true,
-              token,
-              user: {
-                id: u.id,
-                openId,
-                phoneE164: u.phoneE164,
-                name: u.name,
-                role: u.role,
-                accountStatus: u.accountStatus,
-              },
-            });
-          }
-        }
-      } catch (dbErr) {
-        console.warn("[Auth] DB lookup warning during password login:", dbErr);
-      }
-
-      return res.status(404).json({ success: false, error: "No registered account found for this mobile number" });
+      return res.json({
+        success: true,
+        token,
+        user: {
+          id: targetUser.id,
+          openId: targetUser.openId,
+          phoneE164: targetUser.phoneE164,
+          name: targetUser.name,
+          role: targetUser.role,
+          accountStatus: targetUser.accountStatus,
+          dailyWage: targetUser.dailyWage,
+          managerId: targetUser.managerId,
+        },
+      });
     } catch (err) {
       console.error("[Auth] Password login error:", err);
       res.status(500).json({ success: false, error: "Internal server error during login" });
@@ -299,104 +302,90 @@ export function initUserSync(app: Express) {
 
   /**
    * POST /api/users/sync
-   * Create or update managed users and broadcast to storage
+   * Create or update users directly in MySQL. Admin only. No managers.
    */
   app.post("/api/users/sync", async (req: Request, res: Response) => {
     try {
-      if (process.env.NODE_ENV === "production" && req.headers.authorization) {
-        try {
-          const authUser = await sdk.authenticateRequest(req);
-          if (authUser.role !== "admin" && authUser.role !== "manager") {
-            return res.status(403).json({ success: false, error: "Only admins and managers can modify user roster" });
-          }
-        } catch {
-          // Token provided but invalid
-          return res.status(401).json({ success: false, error: "Authentication required" });
-        }
+      const authUser = await sdk.authenticateRequest(req);
+      if (authUser.role !== "admin") {
+        return res.status(403).json({ success: false, error: "Only administrators can modify user roster" });
       }
 
       const body = req.body;
-      const incomingList: SyncUser[] = Array.isArray(body?.users)
-        ? body.users
-        : body?.user
-        ? [body.user]
-        : [];
+      const incomingList = Array.isArray(body?.users) ? body.users : body?.user ? [body.user] : [];
 
       if (incomingList.length === 0) {
         return res.status(400).json({ success: false, error: "No users provided" });
       }
 
-      const currentUsers = loadDiskUsers();
+      const db = await getDb();
+      if (!db) return res.status(503).json({ success: false, error: "Database unavailable" });
 
-      for (const incoming of incomingList) {
-        const incDigits = normalizePhone(incoming.identifier);
-        const existingIndex = currentUsers.findIndex((u) => {
-          const uDigits = normalizePhone(u.identifier);
-          return (
-            (incDigits && uDigits && incDigits === uDigits) ||
-            u.id === incoming.id ||
-            u.identifier.toLowerCase() === incoming.identifier.toLowerCase()
-          );
-        });
+      for (const u of incomingList) {
+        const phone = formatE164(u.identifier || u.phoneE164 || "");
+        if (!phone) continue;
 
-        if (existingIndex >= 0) {
-          // Update existing user, preserving admin role if assigned
-          currentUsers[existingIndex] = {
-            ...currentUsers[existingIndex],
-            ...incoming,
-            // Never demote Super Admin
-            role: currentUsers[existingIndex].identifier.includes("9835916278")
-              ? "admin"
-              : incoming.role || currentUsers[existingIndex].role,
-          };
-        } else {
-          // Insert new user
-          currentUsers.push(incoming);
-        }
-      }
-
-      saveDiskUsers(currentUsers);
-
-      // Async sync to database if available
-      try {
-        const db = await getDb();
-        if (db) {
-          for (const u of incomingList) {
-            let phone = u.identifier.trim();
-            if (/^\d{10}$/.test(phone)) phone = `+91${phone}`;
-            else if (!phone.startsWith("+")) phone = `+${phone}`;
-
-            const existing = await db.select().from(users).where(eq(users.phoneE164, phone)).limit(1);
-            if (existing.length === 0) {
-              const openId = `user_${normalizePhone(phone)}_${Date.now()}`;
-              await db.insert(users).values({
-                openId,
-                phoneE164: phone,
-                name: u.displayName,
-                role: u.role,
-                accountStatus: u.status === "suspended" ? "suspended" : "active",
-                dailyWage: u.dailyWage || 0,
-                loginMethod: "firebase",
-              });
-            } else {
-              await db
-                .update(users)
-                .set({
-                  name: u.displayName,
-                  role: u.role,
-                  accountStatus: u.status === "suspended" ? "suspended" : "active",
-                  dailyWage: u.dailyWage || 0,
-                })
-                .where(eq(users.id, existing[0].id));
-            }
+        const existing = await db.select().from(users).where(eq(users.phoneE164, phone)).limit(1);
+        if (existing.length === 0) {
+          const openId = `user_${normalizePhone(phone)}_${Date.now()}`;
+          let passwordHash: string | null = null;
+          if (u.password && typeof u.password === "string" && u.password.trim()) {
+            passwordHash = await bcrypt.hash(u.password.trim(), 10);
           }
+
+          await db.insert(users).values({
+            openId,
+            phoneE164: phone,
+            name: u.displayName || u.name || "Employee",
+            role: u.role || "employee",
+            accountStatus: u.status === "suspended" ? "suspended" : "active",
+            dailyWage: u.dailyWage || 0,
+            loginMethod: "password",
+            passwordHash,
+          });
+        } else {
+          const updateData: any = {
+            name: u.displayName || u.name || existing[0].name,
+            role: u.role || existing[0].role,
+            accountStatus: u.status === "suspended" ? "suspended" : "active",
+            dailyWage: u.dailyWage !== undefined ? u.dailyWage : existing[0].dailyWage,
+          };
+          if (u.password && typeof u.password === "string" && u.password.trim()) {
+            updateData.passwordHash = await bcrypt.hash(u.password.trim(), 10);
+          }
+
+          await db.update(users).set(updateData).where(eq(users.id, existing[0].id));
         }
-      } catch (dbErr) {
-        console.warn("[UserSync] DB write warning:", dbErr);
       }
 
-      res.json({ success: true, users: currentUsers });
-    } catch (error) {
+      const currentDbUsers = await db
+        .select({
+          id: users.id,
+          openId: users.openId,
+          phoneE164: users.phoneE164,
+          name: users.name,
+          role: users.role,
+          accountStatus: users.accountStatus,
+          dailyWage: users.dailyWage,
+          createdAt: users.createdAt,
+        })
+        .from(users);
+
+      const mapped = currentDbUsers.map((u) => ({
+        id: String(u.id),
+        displayName: u.name || "Employee",
+        identifier: u.phoneE164 || u.openId,
+        role: u.role,
+        status: u.accountStatus,
+        dailyWage: u.dailyWage,
+        createdAt: u.createdAt.toISOString(),
+      }));
+
+      res.json({ success: true, users: mapped });
+    } catch (error: any) {
+      if (error?.status === 401 || error?.status === 403 || error?.statusCode === 401 || error?.statusCode === 403) {
+        return res.status(error.status || error.statusCode || 401).json({ success: false, error: error.message || "Authentication required" });
+      }
       console.error("[UserSync] Sync failed:", error);
       res.status(500).json({ success: false, error: "Sync failed" });
     }
@@ -404,33 +393,33 @@ export function initUserSync(app: Express) {
 
   /**
    * DELETE /api/users/:id
-   * Soft-delete or remove a user
+   * Soft-delete user in MySQL (sets accountStatus = 'removed').
+   * Admin only. No managers.
    */
   app.delete("/api/users/:id", async (req: Request, res: Response) => {
     try {
-      if (process.env.NODE_ENV === "production") {
-        try {
-          const authUser = await sdk.authenticateRequest(req);
-          if (authUser.role !== "admin") {
-            return res.status(403).json({ success: false, error: "Only administrators can delete user accounts" });
-          }
-        } catch {
-          return res.status(401).json({ success: false, error: "Authentication required" });
-        }
+      const authUser = await sdk.authenticateRequest(req);
+      if (authUser.role !== "admin") {
+        return res.status(403).json({ success: false, error: "Only administrators can delete user accounts" });
       }
 
       const targetId = req.params.id;
-      const currentUsers = loadDiskUsers();
+      const numericId = parseInt(targetId, 10);
 
-      const filtered = currentUsers.filter((u) => {
-        // Never remove Super Admin
-        if (u.identifier.includes("9835916278")) return true;
-        return u.id !== targetId && normalizePhone(u.identifier) !== normalizePhone(targetId);
-      });
+      const db = await getDb();
+      if (!db) return res.status(503).json({ success: false, error: "Database unavailable" });
 
-      saveDiskUsers(filtered);
-      res.json({ success: true, users: filtered });
-    } catch (error) {
+      if (!isNaN(numericId)) {
+        await db.update(users).set({ accountStatus: "removed" }).where(eq(users.id, numericId));
+      } else {
+        await db.update(users).set({ accountStatus: "removed" }).where(eq(users.openId, targetId));
+      }
+
+      res.json({ success: true, message: "User removed successfully" });
+    } catch (error: any) {
+      if (error?.status === 401 || error?.status === 403 || error?.statusCode === 401 || error?.statusCode === 403) {
+        return res.status(error.status || error.statusCode || 401).json({ success: false, error: error.message || "Authentication required" });
+      }
       console.error("[UserSync] Delete failed:", error);
       res.status(500).json({ success: false, error: "Delete failed" });
     }

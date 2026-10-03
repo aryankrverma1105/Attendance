@@ -69,7 +69,7 @@ export type AttendanceRecord = {
   checkOutPhotoUri?: string;
   checkInLocation?: LocationEvidence;
   checkOutLocation?: LocationEvidence;
-  status: "verified" | "review" | "pending";
+  status: "verified" | "review" | "pending" | "rejected";
   lateEarlyLabel?: "On time" | "Late" | "Early" | "Pending policy";
   syncState: "pending" | "awaiting-server" | "synced";
 };

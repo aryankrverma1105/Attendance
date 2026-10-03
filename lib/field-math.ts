@@ -23,10 +23,20 @@ export function routeDistanceKm(points: RoutePoint[]) {
   return meters / 1000;
 }
 
+export function formatKolkataDate(date: Date): string {
+  const kolkataOffsetMs = (5 * 60 + 30) * 60 * 1000;
+  const kolkataTime = new Date(date.getTime() + kolkataOffsetMs);
+  const y = kolkataTime.getUTCFullYear();
+  const m = String(kolkataTime.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(kolkataTime.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
 /**
  * Calculates unique calendar days worked based on attendance records.
  * Multiple check-ins/check-outs on the same calendar date count as exactly 1 worked day.
- * If month (1-12) and year are provided, filters to that month.
+ * If month (1-12) and year are provided, filters to that month in Asia/Kolkata timezone.
+ * Payroll counts strictly verified/approved records.
  */
 export function calculateWorkedDays(
   attendanceRecords: AttendanceRecord[],
@@ -36,17 +46,19 @@ export function calculateWorkedDays(
   const uniqueDatesSet = new Set<string>();
 
   attendanceRecords.forEach((record) => {
-    // Only verified or completed attendance counts
-    if (record.status !== "verified" && record.status !== "pending") return;
+    // Only verified/approved attendance records count toward worked days and payroll
+    if (record.status !== "verified") return;
     if (!record.checkInAt) return;
 
     const date = new Date(record.checkInAt);
     if (isNaN(date.getTime())) return;
 
-    if (year !== undefined && date.getFullYear() !== year) return;
-    if (month !== undefined && date.getMonth() + 1 !== month) return;
+    const dateKey = formatKolkataDate(date);
+    const [recYear, recMonth] = dateKey.split("-").map(Number);
 
-    const dateKey = date.toISOString().slice(0, 10); // YYYY-MM-DD
+    if (year !== undefined && recYear !== year) return;
+    if (month !== undefined && recMonth !== month) return;
+
     uniqueDatesSet.add(dateKey);
   });
 

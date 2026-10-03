@@ -22,7 +22,10 @@ export type SessionPayload = {
   openId: string;
   appId: string;
   name: string;
+  tokenVersion?: number;
 };
+
+const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 
 const EXCHANGE_TOKEN_PATH = `/webdev.v1.WebDevAuthPublicService/ExchangeToken`;
 const GET_USER_INFO_PATH = `/webdev.v1.WebDevAuthPublicService/GetUserInfo`;
@@ -147,13 +150,14 @@ class SDKServer {
    */
   async createSessionToken(
     openId: string,
-    options: { expiresInMs?: number; name?: string } = {},
+    options: { expiresInMs?: number; name?: string; tokenVersion?: number } = {},
   ): Promise<string> {
     return this.signSession(
       {
         openId,
         appId: ENV.appId,
         name: options.name || "",
+        tokenVersion: options.tokenVersion ?? 1,
       },
       options,
     );
@@ -164,7 +168,8 @@ class SDKServer {
     options: { expiresInMs?: number } = {},
   ): Promise<string> {
     const issuedAt = Date.now();
-    const expiresInMs = options.expiresInMs ?? ONE_YEAR_MS;
+    // Reduced token life to 30 days max
+    const expiresInMs = options.expiresInMs ?? THIRTY_DAYS_MS;
     const expirationSeconds = Math.floor((issuedAt + expiresInMs) / 1000);
     const secretKey = this.getSessionSecret();
 
@@ -172,6 +177,7 @@ class SDKServer {
       openId: payload.openId,
       appId: payload.appId,
       name: payload.name,
+      tokenVersion: payload.tokenVersion ?? 1,
     })
       .setProtectedHeader({ alg: "HS256", typ: "JWT" })
       .setExpirationTime(expirationSeconds)
@@ -180,7 +186,7 @@ class SDKServer {
 
   async verifySession(
     cookieValue: string | undefined | null,
-  ): Promise<{ openId: string; appId: string; name: string } | null> {
+  ): Promise<{ openId: string; appId: string; name: string; tokenVersion: number } | null> {
     if (!cookieValue) {
       console.warn("[Auth] Missing session cookie");
       return null;
@@ -191,7 +197,7 @@ class SDKServer {
       const { payload } = await jwtVerify(cookieValue, secretKey, {
         algorithms: ["HS256"],
       });
-      const { openId, appId, name } = payload as Record<string, unknown>;
+      const { openId, appId, name, tokenVersion } = payload as Record<string, unknown>;
 
       if (!isNonEmptyString(openId) || !isNonEmptyString(appId) || !isNonEmptyString(name)) {
         console.warn("[Auth] Session payload missing required fields");
@@ -202,6 +208,7 @@ class SDKServer {
         openId,
         appId,
         name,
+        tokenVersion: typeof tokenVersion === "number" ? tokenVersion : 1,
       };
     } catch (error) {
       console.warn("[Auth] Session verification failed", String(error));
@@ -280,6 +287,18 @@ class SDKServer {
 
     if (!user) {
       throw ForbiddenError("User not found");
+    }
+
+    // Reject suspended or removed users immediately
+    if (user.accountStatus === "suspended" || user.accountStatus === "removed") {
+      throw ForbiddenError("Account has been suspended or removed by an administrator");
+    }
+
+    // Check session tokenVersion against user.tokenVersion in DB (Session Revocation)
+    const userTokenVersion = user.tokenVersion ?? 1;
+    const sessionTokenVersion = session.tokenVersion ?? 1;
+    if (sessionTokenVersion !== userTokenVersion) {
+      throw ForbiddenError("Session has been revoked by an administrator");
     }
 
     await db.upsertUser({

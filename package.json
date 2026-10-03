@@ -1,6 +1,7 @@
 {
   "name": "app-template",
   "version": "1.0.0",
+  "type": "module",
   "private": true,
   "main": "expo-router/entry",
   "scripts": {
@@ -36,7 +37,9 @@
     "@trpc/client": "11.7.2",
     "@trpc/react-query": "11.7.2",
     "@trpc/server": "11.7.2",
+    "@types/bcryptjs": "^2.4.6",
     "axios": "^1.13.2",
+    "bcryptjs": "^3.0.3",
     "clsx": "^2.1.1",
     "cookie": "^1.1.1",
     "dotenv": "^16.6.1",
@@ -107,6 +110,5 @@
     "tsx": "^4.21.0",
     "typescript": "~5.9.3",
     "vitest": "^2.1.9"
-  },
-  "packageManager": "pnpm@9.12.0"
+  }
 }

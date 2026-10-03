@@ -1,4 +1,4 @@
-import { int, mysqlEnum, mysqlTable, text, timestamp, varchar } from "drizzle-orm/mysql-core";
+import { double, int, mysqlEnum, mysqlTable, text, timestamp, varchar } from "drizzle-orm/mysql-core";
 
 /**
  * Core user table backing auth flow.
@@ -21,6 +21,10 @@ export const users = mysqlTable("users", {
   dailyWage: int("dailyWage").default(0).notNull(),
   /** Assigned manager ID for team-based scoping. */
   managerId: int("managerId"),
+  /** Hashed password for secure password authentication (scrypt/bcrypt). */
+  passwordHash: varchar("passwordHash", { length: 255 }),
+  /** Session revocation counter. Incrementing invalidates previously issued JWT tokens. */
+  tokenVersion: int("tokenVersion").default(1).notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
   lastSignedIn: timestamp("lastSignedIn").defaultNow().notNull(),
@@ -57,12 +61,28 @@ export const attendanceRecords = mysqlTable("attendance_records", {
     .notNull(),
   checkInAt: timestamp("checkInAt").notNull(),
   checkOutAt: timestamp("checkOutAt"),
-  status: mysqlEnum("status", ["verified", "review", "pending"]).default("verified").notNull(),
+  status: mysqlEnum("status", ["verified", "review", "pending", "rejected"]).default("verified").notNull(),
   checkInPhotoUri: text("checkInPhotoUri"),
   checkOutPhotoUri: text("checkOutPhotoUri"),
   checkInLat: varchar("checkInLat", { length: 32 }),
   checkInLng: varchar("checkInLng", { length: 32 }),
   checkInAccuracy: int("checkInAccuracy"),
+  /** Unique operation ID for client-server replay idempotency. */
+  operationId: varchar("operationId", { length: 128 }).unique(),
+  /** Persisted geofence status computed strictly server-side against authorized sites/tasks. */
+  geofenceStatus: mysqlEnum("geofenceStatus", ["inside", "outside", "unverified"]).default("unverified").notNull(),
+  /** Distance in meters from closest authorized work site / task location. */
+  distanceMeters: int("distanceMeters"),
+  /** Client-reported check-in timestamp (validated against drift and max age). */
+  clientCheckInAt: timestamp("clientCheckInAt"),
+  /** Client-reported check-out timestamp. */
+  clientCheckOutAt: timestamp("clientCheckOutAt"),
+  /** Manager or Administrator who reviewed this record if flagged. */
+  reviewedByUserId: int("reviewedByUserId").references(() => users.id),
+  /** Timestamp when manager/admin completed review. */
+  reviewedAt: timestamp("reviewedAt"),
+  /** Justification notes provided during manager review. */
+  reviewNotes: text("reviewNotes"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });
 
@@ -144,6 +164,8 @@ export const tasks = mysqlTable("tasks", {
   customerName: varchar("customerName", { length: 255 }),
   startedAt: timestamp("startedAt"),
   completedAt: timestamp("completedAt"),
+  /** Unique operation ID for client-server replay idempotency. */
+  operationId: varchar("operationId", { length: 128 }).unique(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 });
@@ -165,6 +187,10 @@ export const gpsPoints = mysqlTable("gps_points", {
   accuracy: int("accuracy"),
   address: text("address"),
   recordedAt: timestamp("recordedAt").notNull(),
+  /** Unique operation ID for client-server replay idempotency. */
+  operationId: varchar("operationId", { length: 128 }).unique(),
+  /** Point capture timestamp on device. */
+  capturedAt: timestamp("capturedAt"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });
 
@@ -185,6 +211,8 @@ export const customers = mysqlTable("customers", {
   notes: text("notes"),
   createdByUserId: int("createdByUserId").references(() => users.id),
   status: mysqlEnum("status", ["active", "archived"]).default("active").notNull(),
+  /** Unique operation ID for client-server replay idempotency. */
+  operationId: varchar("operationId", { length: 128 }).unique(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 });
@@ -214,6 +242,8 @@ export const visits = mysqlTable("visits", {
   meetingOutcome: text("meetingOutcome"),
   notes: text("notes"),
   followUpDate: varchar("followUpDate", { length: 32 }),
+  /** Unique operation ID for client-server replay idempotency. */
+  operationId: varchar("operationId", { length: 128 }).unique(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 });
@@ -267,6 +297,8 @@ export const chatMessages = mysqlTable("chat_messages", {
     .notNull(),
   message: text("message").notNull(),
   status: mysqlEnum("status", ["sent", "delivered", "read"]).default("sent").notNull(),
+  /** Unique operation ID for client-server replay idempotency. */
+  operationId: varchar("operationId", { length: 128 }).unique(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });
 
@@ -288,6 +320,8 @@ export const expenses = mysqlTable("expenses", {
   expenseDate: varchar("expenseDate", { length: 10 }).notNull(), // YYYY-MM-DD
   status: mysqlEnum("status", ["DRAFT", "SUBMITTED", "APPROVED", "REJECTED"]).default("SUBMITTED").notNull(),
   approvedByUserId: int("approvedByUserId").references(() => users.id),
+  /** Unique operation ID for client-server replay idempotency. */
+  operationId: varchar("operationId", { length: 128 }).unique(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 });
@@ -332,4 +366,19 @@ export const notifications = mysqlTable("notifications", {
 
 export type DbNotification = typeof notifications.$inferSelect;
 export type InsertDbNotification = typeof notifications.$inferInsert;
+
+/**
+ * Organizational and Client Project Sites for geofence validation.
+ */
+export const sites = mysqlTable("sites", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  name: varchar("name", { length: 255 }).notNull(),
+  lat: double("lat").notNull(),
+  lng: double("lng").notNull(),
+  geofenceRadiusM: double("geofence_radius_m").default(100).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export type DbSite = typeof sites.$inferSelect;
+export type InsertDbSite = typeof sites.$inferInsert;
 

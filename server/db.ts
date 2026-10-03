@@ -34,6 +34,8 @@ import {
   visits,
   DbVisit,
   InsertDbVisit,
+  sites,
+  DbSite,
 } from "../drizzle/schema";
 import { ENV } from "./_core/env";
 
@@ -232,61 +234,127 @@ export async function activateUserFromInvitation(
   });
 }
 
+export async function seedSuperAdmin(): Promise<void> {
+  const superAdminPhone = process.env.SUPER_ADMIN_PHONE;
+  if (!superAdminPhone) return;
+
+  let cleanPhone = superAdminPhone.trim();
+  if (/^\d{10}$/.test(cleanPhone)) {
+    cleanPhone = `+91${cleanPhone}`;
+  } else if (!cleanPhone.startsWith("+")) {
+    cleanPhone = `+${cleanPhone}`;
+  }
+
+  const db = await getDb();
+  if (!db) {
+    console.warn("[Database] Cannot seed super admin: DB unavailable");
+    return;
+  }
+
+  try {
+    const existing = await db.select().from(users).where(eq(users.phoneE164, cleanPhone)).limit(1);
+    if (existing.length === 0) {
+      console.log(`[Database] Seeding super admin with phone ${cleanPhone}...`);
+      await db.insert(users).values({
+        openId: `admin_${cleanPhone.replace(/[^0-9]/g, "")}`,
+        phoneE164: cleanPhone,
+        name: "Super Admin",
+        role: "admin",
+        accountStatus: "active",
+        tokenVersion: 1,
+      });
+      console.log(`[Database] Super admin seeded successfully.`);
+    } else if (existing[0].role !== "admin") {
+      await db.update(users).set({ role: "admin", accountStatus: "active" }).where(eq(users.id, existing[0].id));
+      console.log(`[Database] Promoted existing user ${cleanPhone} to admin.`);
+    }
+  } catch (err) {
+    console.error("[Database] Failed to seed super admin:", err);
+  }
+}
+
 export async function autoActivateUser(firebaseUid: string, phoneE164: string, name: string) {
   const db = await getDb();
   if (!db) {
-    console.warn("[Database] Cannot auto-activate user: database not available");
-    return undefined;
+    throw new Error("Database unavailable");
+  }
+
+  let cleanPhone = phoneE164.trim();
+  if (/^\d{10}$/.test(cleanPhone)) {
+    cleanPhone = `+91${cleanPhone}`;
+  } else if (!cleanPhone.startsWith("+")) {
+    cleanPhone = `+${cleanPhone}`;
   }
 
   return await db.transaction(async (tx) => {
     const openId = `firebase_${firebaseUid}`;
     const signedInAt = new Date();
 
-    const existing = await tx.select().from(users).where(eq(users.firebaseUid, firebaseUid)).limit(1);
-    if (existing.length > 0) {
-      return existing[0];
+    // 1. Check existing by firebaseUid
+    const existingByUid = await tx.select().from(users).where(eq(users.firebaseUid, firebaseUid)).limit(1);
+    if (existingByUid.length > 0) {
+      const u = existingByUid[0];
+      if (u.accountStatus === "suspended" || u.accountStatus === "removed") {
+        throw new Error("Account has been suspended or removed. Please contact your administrator.");
+      }
+      return u;
     }
 
-    const existingByPhone = await tx.select().from(users).where(eq(users.phoneE164, phoneE164)).limit(1);
+    // 2. Check existing pre-created user by phone number
+    const existingByPhone = await tx.select().from(users).where(eq(users.phoneE164, cleanPhone)).limit(1);
     if (existingByPhone.length > 0) {
+      const u = existingByPhone[0];
+      if (u.accountStatus === "suspended" || u.accountStatus === "removed") {
+        throw new Error("Account has been suspended or removed. Please contact your administrator.");
+      }
       await tx
         .update(users)
         .set({
           firebaseUid,
+          accountStatus: "active",
           lastSignedIn: signedInAt,
         })
-        .where(eq(users.id, existingByPhone[0].id));
-      const updated = await tx.select().from(users).where(eq(users.id, existingByPhone[0].id)).limit(1);
+        .where(eq(users.id, u.id));
+      const updated = await tx.select().from(users).where(eq(users.id, u.id)).limit(1);
       return updated[0];
     }
 
-    const allUsers = await tx.select().from(users).limit(1);
-    const role = allUsers.length === 0 ? "admin" : "employee";
+    // 3. Check pending invitation
+    const pendingInvites = await tx
+      .select()
+      .from(accountInvitations)
+      .where(and(eq(accountInvitations.phoneE164, cleanPhone), eq(accountInvitations.status, "pending")))
+      .limit(1);
 
-    const [insertResult] = await tx.insert(users).values({
-      openId,
-      firebaseUid,
-      phoneE164,
-      name,
-      role,
-      accountStatus: "active",
-      lastSignedIn: signedInAt,
-    });
+    if (pendingInvites.length > 0) {
+      const invite = pendingInvites[0];
+      const [insertResult] = await tx.insert(users).values({
+        openId,
+        firebaseUid,
+        phoneE164: cleanPhone,
+        name: name || "Employee",
+        role: invite.role,
+        accountStatus: "active",
+        lastSignedIn: signedInAt,
+        tokenVersion: 1,
+      });
+      const userId = insertResult.insertId;
 
-    const userId = insertResult.insertId;
+      await tx
+        .update(accountInvitations)
+        .set({
+          status: "consumed",
+          userId,
+          consumedAt: signedInAt,
+        })
+        .where(eq(accountInvitations.id, invite.id));
 
-    const auditId = `audit-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    await tx.insert(auditEvents).values({
-      id: auditId,
-      actorUserOpenId: openId,
-      subjectUserOpenId: openId,
-      action: "account.auto_activated",
-      detail: `Auto-activated first-time or dev account for phone ${phoneE164} as role ${role}`,
-    });
+      const activeUser = await tx.select().from(users).where(eq(users.id, userId)).limit(1);
+      return activeUser[0];
+    }
 
-    const activeUser = await tx.select().from(users).where(eq(users.id, userId)).limit(1);
-    return activeUser[0];
+    // Strictly do NOT create arbitrary users or make the first user admin!
+    throw new Error("No pre-created account or pending invitation found for this phone number. Please contact an administrator.");
   });
 }
 
@@ -326,8 +394,7 @@ export async function updateUserDailyWage(
 
   const db = await getDb();
   if (!db) {
-    console.warn("[Database] Cannot update wage: database not available");
-    return { success: true, updatedWage: newDailyWage };
+    throw new Error("Database unavailable");
   }
 
   const targetUser = await getUserById(targetUserId);
@@ -387,7 +454,20 @@ export async function updateUserDailyWage(
 }
 
 /**
- * Calculates server-side verified worked days (count of unique calendar dates with verified check-in)
+ * Returns date formatted as YYYY-MM-DD in Asia/Kolkata time zone.
+ */
+export function formatKolkataDate(date: Date): string {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  return formatter.format(date);
+}
+
+/**
+ * Calculates server-side verified worked days (count of unique calendar dates with verified/approved check-in in Asia/Kolkata)
  * and earnings for a given month and year.
  */
 export async function getEmployeeWorkedDaysAndEarnings(
@@ -413,27 +493,35 @@ export async function getEmployeeWorkedDaysAndEarnings(
     };
   }
 
-  const startOfMonth = new Date(year, month - 1, 1);
-  const endOfMonth = new Date(year, month, 0, 23, 59, 59);
+  // Cover entire month with padding for Asia/Kolkata (UTC+5:30)
+  const startRange = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0) - 24 * 3600 * 1000);
+  const endRange = new Date(Date.UTC(year, month, 1, 23, 59, 59) + 24 * 3600 * 1000);
 
-  // Fetch verified attendance records within the date range
+  // Fetch attendance records within the date range
   const records = await db
     .select()
     .from(attendanceRecords)
     .where(
       and(
         eq(attendanceRecords.userId, userId),
-        eq(attendanceRecords.status, "verified"),
-        gte(attendanceRecords.checkInAt, startOfMonth),
-        lte(attendanceRecords.checkInAt, endOfMonth)
+        or(eq(attendanceRecords.status, "verified"), eq(attendanceRecords.status, "review")),
+        gte(attendanceRecords.checkInAt, startRange),
+        lte(attendanceRecords.checkInAt, endRange)
       )
     );
 
-  // Count unique calendar dates (YYYY-MM-DD)
+  // Payroll counts verified/approved records
+  const validRecords = records.filter((r) => r.status === "verified");
+
+  // Count unique calendar dates (YYYY-MM-DD) in Asia/Kolkata
   const uniqueDatesSet = new Set<string>();
-  records.forEach((r) => {
-    const dateStr = r.checkInAt.toISOString().slice(0, 10);
-    uniqueDatesSet.add(dateStr);
+  const targetMonthPrefix = `${year}-${String(month).padStart(2, "0")}`;
+
+  validRecords.forEach((r) => {
+    const dateStr = formatKolkataDate(new Date(r.checkInAt));
+    if (dateStr.startsWith(targetMonthPrefix)) {
+      uniqueDatesSet.add(dateStr);
+    }
   });
 
   const workedDates = Array.from(uniqueDatesSet).sort();
@@ -452,7 +540,7 @@ export async function getEmployeeWorkedDaysAndEarnings(
   } else {
     // Calculate for each worked date based on effective wage on that date
     for (const dateStr of workedDates) {
-      const workedDate = new Date(dateStr);
+      const workedDate = new Date(dateStr + "T12:00:00+05:30");
       const effectiveWageRecord = wageHistory.find(
         (w) => w.effectiveFrom <= workedDate && (!w.effectiveTo || w.effectiveTo >= workedDate)
       );
@@ -564,10 +652,23 @@ export async function createTask(
     locationLng?: string;
     locationAddress?: string;
     customerName?: string;
+    operationId?: string;
   }
 ): Promise<DbTask> {
   if (actorUser.role !== "admin" && actorUser.role !== "manager") {
     throw new Error("Forbidden: Only Administrators and Managers can assign tasks.");
+  }
+
+  const db = await getDb();
+  if (!db) {
+    throw new Error("Database unavailable.");
+  }
+
+  if (input.operationId) {
+    const existingOp = await db.select().from(tasks).where(eq(tasks.operationId, input.operationId)).limit(1);
+    if (existingOp.length > 0) {
+      return existingOp[0];
+    }
   }
 
   const targetUser = await getUserById(input.assignedToUserId);
@@ -581,11 +682,6 @@ export async function createTask(
   // Manager scoping check: Manager can only assign tasks to their assigned team
   if (actorUser.role === "manager" && targetUser.managerId !== actorUser.id) {
     throw new Error("Forbidden: Managers can only assign tasks to employees in their own team.");
-  }
-
-  const db = await getDb();
-  if (!db) {
-    throw new Error("Database unavailable.");
   }
 
   const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -602,6 +698,7 @@ export async function createTask(
     locationLng: input.locationLng,
     locationAddress: input.locationAddress,
     customerName: input.customerName,
+    operationId: input.operationId || null,
   });
 
   const created = await db.select().from(tasks).where(eq(tasks.id, taskId)).limit(1);
@@ -692,12 +789,27 @@ export async function recordGpsPoint(
     longitude: string;
     accuracy?: number;
     address?: string;
+    operationId?: string;
+    capturedAt?: string | Date;
   }
 ): Promise<DbGpsPoint> {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable.");
 
+  if (point.operationId) {
+    const existingOp = await db
+      .select()
+      .from(gpsPoints)
+      .where(eq(gpsPoints.operationId, point.operationId))
+      .limit(1);
+    if (existingOp.length > 0) {
+      return existingOp[0];
+    }
+  }
+
   const id = `gps-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const capturedAtDate = point.capturedAt ? new Date(point.capturedAt) : new Date();
+
   await db.insert(gpsPoints).values({
     id,
     userId,
@@ -706,6 +818,8 @@ export async function recordGpsPoint(
     longitude: point.longitude,
     accuracy: point.accuracy,
     address: point.address,
+    operationId: point.operationId || null,
+    capturedAt: isNaN(capturedAtDate.getTime()) ? new Date() : capturedAtDate,
     recordedAt: new Date(),
   });
 
@@ -837,6 +951,28 @@ export function haversineDistanceMeters(
 /**
  * Server-side Attendance Verification System with Geofencing, Mock Detection & Idempotency.
  */
+function validateClientTimestamp(tsStr?: string): Date | undefined {
+  if (!tsStr) return undefined;
+  const d = new Date(tsStr);
+  if (isNaN(d.getTime())) return undefined;
+  const now = Date.now();
+  const diffMs = now - d.getTime();
+  // Reject if more than 24h old
+  if (diffMs > 24 * 60 * 60 * 1000) {
+    throw new Error("Client timestamp is more than 24 hours old and cannot be accepted.");
+  }
+  // Reject if in the future (>5 minutes tolerance for minor clock skew)
+  if (diffMs < -5 * 60 * 1000) {
+    throw new Error("Client timestamp is in the future and cannot be accepted.");
+  }
+  return d;
+}
+
+/**
+ * Server-side Attendance Verification System with Geofencing, Mock Detection & Idempotency.
+ * The allowed work site is determined strictly from the database (sites, assigned tasks, customer visits, or office),
+ * never from client-supplied targets.
+ */
 export async function recordAttendanceCheckIn(
   employeeUser: User,
   input: {
@@ -847,9 +983,7 @@ export async function recordAttendanceCheckIn(
     operationId?: string;
     clientCheckInAt?: string;
     isMocked?: boolean;
-    targetLat?: string;
-    targetLng?: string;
-    geofenceRadiusMeters?: number;
+    // Client-supplied targetLat, targetLng, geofenceRadiusMeters are discarded for security.
   }
 ): Promise<any> {
   if (employeeUser.role !== "employee") {
@@ -859,9 +993,23 @@ export async function recordAttendanceCheckIn(
   const db = await getDb();
   if (!db) throw new Error("Database unavailable.");
 
-  const now = new Date();
+  // 1. Idempotency Check: if operationId provided and matches existing, return existing record
+  if (input.operationId) {
+    const existingOp = await db
+      .select()
+      .from(attendanceRecords)
+      .where(eq(attendanceRecords.operationId, input.operationId))
+      .limit(1);
+    if (existingOp.length > 0) {
+      return existingOp[0];
+    }
+  }
 
-  // 1. Idempotency Check: prevent rapid duplicate check-ins within 60 seconds
+  const validatedClientCheckIn = validateClientTimestamp(input.clientCheckInAt);
+  const now = new Date();
+  const effectiveCheckInAt = validatedClientCheckIn || now;
+
+  // Prevent rapid duplicate check-ins within 30 seconds
   const recentRecords = await db
     .select()
     .from(attendanceRecords)
@@ -877,9 +1025,7 @@ export async function recordAttendanceCheckIn(
   }
 
   const id = `att-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
-  // 2. Mock GPS & Accuracy validation (independently configurable on server)
-  const MAX_GPS_ACCURACY_METERS = Number(process.env.MAX_GPS_ACCURACY_METERS) || 150;
+  const MAX_GPS_ACCURACY_METERS = Number(process.env.MAX_GPS_ACCURACY_METERS) || 100;
   const DEFAULT_GEOFENCE_RADIUS_METERS = Number(process.env.DEFAULT_GEOFENCE_RADIUS_METERS) || 300;
 
   let isMockedFlag = input.isMocked ? 1 : 0;
@@ -892,22 +1038,116 @@ export async function recordAttendanceCheckIn(
     status = "review";
   }
 
-  // 3. Server-Authoritative Geofence Distance Validation
-  let geofenceStatus: "inside" | "outside" | "unverified" = "inside";
-  if (input.checkInLat && input.checkInLng && input.targetLat && input.targetLng) {
+  // 2. Query allowed sites strictly from server DB:
+  // - registered company sites in 'sites' table
+  // - tasks assigned to employee with location coordinates
+  // - scheduled customer visits with customer coordinates
+  // - office coordinates from server environment if configured
+  interface AllowedSite {
+    name: string;
+    lat: number;
+    lng: number;
+    radius: number;
+  }
+  const allowedSites: AllowedSite[] = [];
+
+  const dbSites = await db.select().from(sites);
+  for (const s of dbSites) {
+    allowedSites.push({
+      name: s.name,
+      lat: s.lat,
+      lng: s.lng,
+      radius: s.geofenceRadiusM || DEFAULT_GEOFENCE_RADIUS_METERS,
+    });
+  }
+
+  const userTasks = await db
+    .select()
+    .from(tasks)
+    .where(and(eq(tasks.assignedToUserId, employeeUser.id), or(eq(tasks.status, "PENDING"), eq(tasks.status, "IN_PROGRESS"))));
+  for (const t of userTasks) {
+    if (t.locationLat && t.locationLng) {
+      const lat = parseFloat(t.locationLat);
+      const lng = parseFloat(t.locationLng);
+      if (!isNaN(lat) && !isNaN(lng)) {
+        allowedSites.push({
+          name: t.title || "Assigned Task",
+          lat,
+          lng,
+          radius: DEFAULT_GEOFENCE_RADIUS_METERS,
+        });
+      }
+    }
+  }
+
+  const userVisits = await db
+    .select()
+    .from(visits)
+    .where(and(eq(visits.employeeUserId, employeeUser.id), or(eq(visits.status, "SCHEDULED"), eq(visits.status, "IN_PROGRESS"))));
+  for (const v of userVisits) {
+    const cust = await db.select().from(customers).where(eq(customers.id, v.customerId)).limit(1);
+    if (cust.length > 0 && cust[0].latitude && cust[0].longitude) {
+      const lat = parseFloat(cust[0].latitude);
+      const lng = parseFloat(cust[0].longitude);
+      if (!isNaN(lat) && !isNaN(lng)) {
+        allowedSites.push({
+          name: cust[0].name || "Customer Visit",
+          lat,
+          lng,
+          radius: DEFAULT_GEOFENCE_RADIUS_METERS,
+        });
+      }
+    }
+  }
+
+  if (process.env.OFFICE_LAT && process.env.OFFICE_LNG) {
+    const offLat = parseFloat(process.env.OFFICE_LAT);
+    const offLng = parseFloat(process.env.OFFICE_LNG);
+    const offRadius = Number(process.env.OFFICE_RADIUS_METERS) || DEFAULT_GEOFENCE_RADIUS_METERS;
+    if (!isNaN(offLat) && !isNaN(offLng)) {
+      allowedSites.push({
+        name: "Headquarters",
+        lat: offLat,
+        lng: offLng,
+        radius: offRadius,
+      });
+    }
+  }
+
+  // 3. Compute geofence status and distance
+  let geofenceStatus: "inside" | "outside" | "unverified" = "unverified";
+  let minDistanceMeters: number | undefined = undefined;
+
+  if (input.checkInLat && input.checkInLng) {
     const empLat = parseFloat(input.checkInLat);
     const empLng = parseFloat(input.checkInLng);
-    const tgtLat = parseFloat(input.targetLat);
-    const tgtLng = parseFloat(input.targetLng);
 
-    if (!isNaN(empLat) && !isNaN(empLng) && !isNaN(tgtLat) && !isNaN(tgtLng)) {
-      const distance = haversineDistanceMeters(empLat, empLng, tgtLat, tgtLng);
-      const allowedRadius = input.geofenceRadiusMeters || DEFAULT_GEOFENCE_RADIUS_METERS;
-      if (distance > allowedRadius) {
-        geofenceStatus = "outside";
-        status = "review"; // Flag for manager review if outside geofence
+    if (!isNaN(empLat) && !isNaN(empLng)) {
+      if (allowedSites.length > 0) {
+        let insideAny = false;
+        let smallestDist = Infinity;
+
+        for (const site of allowedSites) {
+          const dist = haversineDistanceMeters(empLat, empLng, site.lat, site.lng);
+          if (dist < smallestDist) {
+            smallestDist = dist;
+          }
+          if (dist <= site.radius) {
+            insideAny = true;
+          }
+        }
+
+        minDistanceMeters = smallestDist;
+        if (insideAny) {
+          geofenceStatus = "inside";
+        } else {
+          geofenceStatus = "outside";
+          status = "review"; // Flag for review when outside authorized geofence
+        }
       } else {
+        // Fallback when no sites configured
         geofenceStatus = "inside";
+        minDistanceMeters = 0;
       }
     }
   }
@@ -915,12 +1155,16 @@ export async function recordAttendanceCheckIn(
   await db.insert(attendanceRecords).values({
     id,
     userId: employeeUser.id,
-    checkInAt: now,
+    checkInAt: effectiveCheckInAt,
+    clientCheckInAt: validatedClientCheckIn,
     status,
     checkInPhotoUri: input.checkInPhotoUri,
     checkInLat: input.checkInLat,
     checkInLng: input.checkInLng,
     checkInAccuracy: input.checkInAccuracy,
+    operationId: input.operationId || null,
+    geofenceStatus,
+    distanceMeters: minDistanceMeters,
   });
 
   const record = await db.select().from(attendanceRecords).where(eq(attendanceRecords.id, id)).limit(1);
@@ -942,11 +1186,27 @@ export async function recordAttendanceCheckOut(
   const db = await getDb();
   if (!db) throw new Error("Database unavailable.");
 
+  // Idempotency: if operationId provided and matches completed record, return it
+  if (input.operationId) {
+    const existingOp = await db
+      .select()
+      .from(attendanceRecords)
+      .where(eq(attendanceRecords.operationId, input.operationId))
+      .limit(1);
+    if (existingOp.length > 0 && existingOp[0].checkOutAt) {
+      return existingOp[0];
+    }
+  }
+
+  const validatedClientCheckOut = validateClientTimestamp(input.clientCheckOutAt);
+  const now = new Date();
+  const effectiveCheckOutAt = validatedClientCheckOut || now;
+
   // Find latest active attendance record for this user
   const activeRecords = await db
     .select()
     .from(attendanceRecords)
-    .where(and(eq(attendanceRecords.userId, employeeUser.id)))
+    .where(eq(attendanceRecords.userId, employeeUser.id))
     .orderBy(desc(attendanceRecords.checkInAt))
     .limit(1);
 
@@ -955,18 +1215,130 @@ export async function recordAttendanceCheckOut(
   }
 
   const targetRecord = activeRecords[0];
-  const now = new Date();
 
   await db
     .update(attendanceRecords)
     .set({
-      checkOutAt: now,
+      checkOutAt: effectiveCheckOutAt,
+      clientCheckOutAt: validatedClientCheckOut,
       checkOutPhotoUri: input.checkOutPhotoUri,
     })
     .where(eq(attendanceRecords.id, targetRecord.id));
 
   const updated = await db.select().from(attendanceRecords).where(eq(attendanceRecords.id, targetRecord.id)).limit(1);
   return updated[0];
+}
+
+/**
+ * Review an attendance record flagged for review.
+ * Allowed for Administrator or Manager (managers restricted to their assigned team).
+ */
+export async function reviewAttendanceRecord(
+  actorUser: User,
+  input: {
+    recordId: string;
+    decision: "approved" | "rejected";
+    notes?: string;
+  }
+): Promise<any> {
+  if (actorUser.role !== "admin" && actorUser.role !== "manager") {
+    throw new Error("Forbidden: Only Administrators and Managers can review attendance records.");
+  }
+
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable.");
+
+  const records = await db.select().from(attendanceRecords).where(eq(attendanceRecords.id, input.recordId)).limit(1);
+  if (records.length === 0) throw new Error("Attendance record not found.");
+  const record = records[0];
+
+  const targetUser = await getUserById(record.userId);
+  if (!targetUser) throw new Error("Employee not found.");
+
+  if (actorUser.role === "manager" && targetUser.managerId !== actorUser.id) {
+    throw new Error("Forbidden: Managers can only review attendance records for employees in their own team.");
+  }
+
+  const now = new Date();
+  const newStatus = input.decision === "approved" ? "verified" : "rejected";
+
+  await db
+    .update(attendanceRecords)
+    .set({
+      status: newStatus,
+      reviewedByUserId: actorUser.id,
+      reviewedAt: now,
+      reviewNotes: input.notes || null,
+    })
+    .where(eq(attendanceRecords.id, input.recordId));
+
+  const auditId = `audit-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  await db.insert(auditEvents).values({
+    id: auditId,
+    actorUserOpenId: actorUser.openId,
+    subjectUserOpenId: targetUser.openId,
+    action: "attendance.reviewed",
+    detail: `${actorUser.name || actorUser.role} reviewed attendance record ${input.recordId} -> ${newStatus} (${input.notes || ""})`,
+  });
+
+  const updated = await db.select().from(attendanceRecords).where(eq(attendanceRecords.id, input.recordId)).limit(1);
+  return updated[0];
+}
+
+/**
+ * Returns team attendance records (with selfie URLs, status, GPS coordinates)
+ * for managers (scoped to team) and administrators (all).
+ */
+export async function getTeamAttendance(
+  actorUser: User,
+  date?: string // YYYY-MM-DD
+): Promise<any[]> {
+  if (actorUser.role !== "admin" && actorUser.role !== "manager") {
+    throw new Error("Forbidden: Only Administrators and Managers can view team attendance.");
+  }
+
+  const db = await getDb();
+  if (!db) return [];
+
+  let teamUserIds: number[] = [];
+  if (actorUser.role === "admin") {
+    const all = await db.select().from(users);
+    teamUserIds = all.map((u) => u.id);
+  } else {
+    const teamMembers = await getUsersByManagerId(actorUser.id);
+    teamUserIds = [actorUser.id, ...teamMembers.map((u) => u.id)];
+  }
+
+  if (teamUserIds.length === 0) return [];
+
+  const allRecords = await db
+    .select()
+    .from(attendanceRecords)
+    .orderBy(desc(attendanceRecords.checkInAt));
+
+  const filtered = allRecords.filter((r) => teamUserIds.includes(r.userId));
+
+  let finalRecords = filtered;
+  if (date) {
+    finalRecords = filtered.filter((r) => {
+      const recordDate = formatKolkataDate(new Date(r.checkInAt));
+      return recordDate === date;
+    });
+  }
+
+  const allUsers = await getAllUsers();
+  const userMap = new Map<number, User>();
+  allUsers.forEach((u) => userMap.set(u.id, u));
+
+  return finalRecords.map((r) => {
+    const u = userMap.get(r.userId);
+    return {
+      ...r,
+      employeeName: u?.name || `Employee #${r.userId}`,
+      employeePhone: u?.phoneE164,
+      employeeRole: u?.role,
+    };
+  });
 }
 
 export async function getAttendanceRecords(
@@ -1002,6 +1374,9 @@ export async function getAttendanceRecords(
 /**
  * Customers Management
  */
+/**
+ * Customers Management
+ */
 export async function createCustomer(
   actorUser: User,
   input: {
@@ -1012,10 +1387,16 @@ export async function createCustomer(
     latitude?: string;
     longitude?: string;
     notes?: string;
+    operationId?: string;
   }
 ): Promise<DbCustomer> {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable.");
+
+  if (input.operationId) {
+    const existingOp = await db.select().from(customers).where(eq(customers.operationId, input.operationId)).limit(1);
+    if (existingOp.length > 0) return existingOp[0];
+  }
 
   const customerId = `cust-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   await db.insert(customers).values({
@@ -1029,6 +1410,7 @@ export async function createCustomer(
     notes: input.notes?.trim(),
     createdByUserId: actorUser.id,
     status: "active",
+    operationId: input.operationId || null,
   });
 
   const created = await db.select().from(customers).where(eq(customers.id, customerId)).limit(1);
@@ -1054,6 +1436,11 @@ export async function updateCustomer(
 
   const existing = await db.select().from(customers).where(eq(customers.id, customerId)).limit(1);
   if (existing.length === 0) throw new Error("Customer not found.");
+
+  // Ownership check: creator, manager, or admin
+  if (actorUser.role === "employee" && existing[0].createdByUserId !== actorUser.id) {
+    throw new Error("Forbidden: You can only update customers that you created.");
+  }
 
   await db.update(customers).set(input).where(eq(customers.id, customerId));
   const updated = await db.select().from(customers).where(eq(customers.id, customerId)).limit(1);
@@ -1081,10 +1468,16 @@ export async function createVisit(
     employeeUserId?: number;
     scheduledFor: Date;
     notes?: string;
+    operationId?: string;
   }
 ): Promise<DbVisit> {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable.");
+
+  if (input.operationId) {
+    const existingOp = await db.select().from(visits).where(eq(visits.operationId, input.operationId)).limit(1);
+    if (existingOp.length > 0) return existingOp[0];
+  }
 
   const assignedEmployeeId = input.employeeUserId || actorUser.id;
 
@@ -1107,6 +1500,7 @@ export async function createVisit(
     scheduledFor: input.scheduledFor,
     status: "SCHEDULED",
     notes: input.notes,
+    operationId: input.operationId || null,
   });
 
   const created = await db.select().from(visits).where(eq(visits.id, visitId)).limit(1);
@@ -1232,6 +1626,20 @@ export async function addVisitEvidence(
   const db = await getDb();
   if (!db) throw new Error("Database unavailable.");
 
+  const existingVisit = await db.select().from(visits).where(eq(visits.id, visitId)).limit(1);
+  if (existingVisit.length === 0) throw new Error("Visit not found.");
+  const visit = existingVisit[0];
+
+  // Ownership check: owner, their manager, or admin
+  if (actorUser.role === "employee" && visit.employeeUserId !== actorUser.id) {
+    throw new Error("Forbidden: Employees can only add evidence to their own visits.");
+  } else if (actorUser.role === "manager") {
+    const owner = await getUserById(visit.employeeUserId);
+    if (owner?.managerId !== actorUser.id && visit.employeeUserId !== actorUser.id) {
+      throw new Error("Forbidden: Managers can only add evidence to visits for their assigned team.");
+    }
+  }
+
   const evidenceId = `evid-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   await db.insert(visitEvidence).values({
     id: evidenceId,
@@ -1294,6 +1702,17 @@ export async function getVisitDetail(
   if (existing.length === 0) return null;
 
   const visit = existing[0];
+
+  // Ownership check: owner, their manager, or admin
+  if (actorUser.role === "employee" && visit.employeeUserId !== actorUser.id) {
+    throw new Error("Forbidden: Employees can only view their own visits.");
+  } else if (actorUser.role === "manager") {
+    const owner = await getUserById(visit.employeeUserId);
+    if (owner?.managerId !== actorUser.id && visit.employeeUserId !== actorUser.id) {
+      throw new Error("Forbidden: Managers can only view visits for their assigned team.");
+    }
+  }
+
   const customerList = await db.select().from(customers).where(eq(customers.id, visit.customerId)).limit(1);
   const evidenceList = await db.select().from(visitEvidence).where(eq(visitEvidence.visitId, visitId));
 
@@ -1313,6 +1732,20 @@ export async function getOrCreateDirectChannel(
 ): Promise<DbChatChannel> {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable.");
+
+  const targetUser = await getUserById(targetUserId);
+  if (!targetUser) throw new Error("Target user not found.");
+
+  // Ownership check: only between employee and their assigned manager or admin
+  if (actorUser.role === "employee") {
+    if (targetUser.role !== "admin" && actorUser.managerId !== targetUserId) {
+      throw new Error("Forbidden: Employees can only chat with their assigned manager or an administrator.");
+    }
+  } else if (actorUser.role === "manager") {
+    if (targetUser.role !== "admin" && targetUser.managerId !== actorUser.id) {
+      throw new Error("Forbidden: Managers can only chat with their assigned team members or administrators.");
+    }
+  }
 
   // Check if channel exists in either order
   const existing = await db
@@ -1345,10 +1778,25 @@ export async function getOrCreateDirectChannel(
 export async function sendChatMessage(
   actorUser: User,
   channelId: string,
-  message: string
+  message: string,
+  operationId?: string
 ): Promise<DbChatMessage> {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable.");
+
+  if (operationId) {
+    const existingOp = await db.select().from(chatMessages).where(eq(chatMessages.operationId, operationId)).limit(1);
+    if (existingOp.length > 0) return existingOp[0];
+  }
+
+  const channels = await db.select().from(chatChannels).where(eq(chatChannels.id, channelId)).limit(1);
+  if (channels.length === 0) throw new Error("Chat channel not found.");
+  const chan = channels[0];
+
+  // Channel membership check
+  if (actorUser.role !== "admin" && chan.managerUserId !== actorUser.id && chan.employeeUserId !== actorUser.id) {
+    throw new Error("Forbidden: You are not a member of this chat channel.");
+  }
 
   const msgId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   await db.insert(chatMessages).values({
@@ -1357,6 +1805,7 @@ export async function sendChatMessage(
     senderUserId: actorUser.id,
     message: message.trim(),
     status: "sent",
+    operationId: operationId || null,
   });
 
   const created = await db.select().from(chatMessages).where(eq(chatMessages.id, msgId)).limit(1);
@@ -1370,6 +1819,15 @@ export async function getChannelMessages(
 ): Promise<DbChatMessage[]> {
   const db = await getDb();
   if (!db) return [];
+
+  const channels = await db.select().from(chatChannels).where(eq(chatChannels.id, channelId)).limit(1);
+  if (channels.length === 0) return [];
+  const chan = channels[0];
+
+  // Channel membership check
+  if (actorUser.role !== "admin" && chan.managerUserId !== actorUser.id && chan.employeeUserId !== actorUser.id) {
+    throw new Error("Forbidden: You are not a member of this chat channel.");
+  }
 
   return await db
     .select()
@@ -1390,10 +1848,16 @@ export async function createExpense(
     description?: string;
     receiptUrl?: string;
     expenseDate: string;
+    operationId?: string;
   }
 ): Promise<DbExpense> {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable.");
+
+  if (input.operationId) {
+    const existingOp = await db.select().from(expenses).where(eq(expenses.operationId, input.operationId)).limit(1);
+    if (existingOp.length > 0) return existingOp[0];
+  }
 
   const expenseId = `exp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   await db.insert(expenses).values({
@@ -1405,6 +1869,7 @@ export async function createExpense(
     receiptUrl: input.receiptUrl,
     expenseDate: input.expenseDate,
     status: "SUBMITTED",
+    operationId: input.operationId || null,
   });
 
   const created = await db.select().from(expenses).where(eq(expenses.id, expenseId)).limit(1);
@@ -1454,6 +1919,23 @@ export async function reviewExpense(
 
   const db = await getDb();
   if (!db) throw new Error("Database unavailable.");
+
+  const expList = await db.select().from(expenses).where(eq(expenses.id, expenseId)).limit(1);
+  if (expList.length === 0) throw new Error("Expense not found.");
+  const exp = expList[0];
+
+  // Never self-approval
+  if (exp.employeeUserId === actorUser.id) {
+    throw new Error("Forbidden: Self-approval of expenses is prohibited.");
+  }
+
+  // Managers can only review for their team
+  if (actorUser.role === "manager") {
+    const owner = await getUserById(exp.employeeUserId);
+    if (owner?.managerId !== actorUser.id) {
+      throw new Error("Forbidden: Managers can only review expenses for their own team.");
+    }
+  }
 
   await db
     .update(expenses)

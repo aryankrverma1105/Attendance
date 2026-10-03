@@ -14,6 +14,7 @@ import { ScreenContainer } from "@/components/screen-container";
 import { formatCurrency, formatDay, useFieldData } from "@/lib/field-data";
 import { hasPermission } from "@/lib/field-access";
 import type { ManagedUser } from "@/lib/field-types";
+import { trpc } from "@/lib/trpc";
 
 export default function ManagerTeamScreen() {
   const router = useRouter();
@@ -26,16 +27,55 @@ export default function ManagerTeamScreen() {
   const isAdmin = actorRole === "admin";
   const canAccessTeam = hasPermission(actorRole, "team.read.own");
 
+  const teamAttendanceQuery = trpc.attendance.getTeamAttendance.useQuery(undefined, {
+    enabled: canAccessTeam,
+    refetchInterval: 15000,
+  });
+  const usersQuery = trpc.workforce.listUsers.useQuery(undefined, {
+    enabled: canAccessTeam,
+    refetchInterval: 15000,
+  });
+
+  const allEmployees: ManagedUser[] = useMemo(() => {
+    if (usersQuery.data && Array.isArray(usersQuery.data)) {
+      return usersQuery.data
+        .filter((u) => u.role === "employee" && u.accountStatus !== "removed")
+        .map((u) => ({
+          id: String(u.id),
+          accountLinkId: `account-${u.id}`,
+          displayName: u.name || u.phoneE164 || `User #${u.id}`,
+          identifier: u.phoneE164 || u.openId || String(u.id),
+          role: "employee" as const,
+          status: (u.accountStatus === "removed" ? "suspended" : u.accountStatus) as "active" | "invited" | "suspended",
+          department: undefined,
+          dailyWage: u.dailyWage ?? 0,
+          managerId: u.managerId ? String(u.managerId) : undefined,
+          createdAt: new Date(u.createdAt).toISOString(),
+        }));
+    }
+    return data.managedUsers.filter((u) => u.role === "employee");
+  }, [usersQuery.data, data.managedUsers]);
+
   // Strictly filter for assigned team members if manager
   const teamMembers = useMemo(() => {
-    if (isAdmin) return data.managedUsers.filter((u) => u.role === "employee");
+    if (isAdmin) return allEmployees;
     if (isManager) {
-      return data.managedUsers.filter(
+      return allEmployees.filter(
         (u) => u.managerId === actorId || (!u.managerId && u.role === "employee")
       );
     }
     return [];
-  }, [data.managedUsers, isAdmin, isManager, actorId]);
+  }, [allEmployees, isAdmin, isManager, actorId]);
+
+  const teamAttendanceMap = useMemo(() => {
+    const map = new Map<string, any>();
+    if (teamAttendanceQuery.data && Array.isArray(teamAttendanceQuery.data)) {
+      for (const rec of teamAttendanceQuery.data) {
+        map.set(String(rec.userId), rec);
+      }
+    }
+    return map;
+  }, [teamAttendanceQuery.data]);
 
   const visibleTeam = useMemo(() => {
     return teamMembers.filter((emp) =>
@@ -46,13 +86,19 @@ export default function ManagerTeamScreen() {
   }, [teamMembers, query]);
 
   const activeTodayCount = useMemo(() => {
+    if (teamAttendanceQuery.data && Array.isArray(teamAttendanceQuery.data)) {
+      return teamMembers.filter((emp) => {
+        const att = teamAttendanceMap.get(emp.id);
+        return att && !att.checkOutAt;
+      }).length;
+    }
     const today = new Date().toISOString().slice(0, 10);
     return teamMembers.filter((emp) =>
       data.attendance.some(
         (a) => a.employeeId === emp.id && a.checkInAt.startsWith(today)
       )
     ).length;
-  }, [teamMembers, data.attendance]);
+  }, [teamMembers, teamAttendanceQuery.data, teamAttendanceMap, data.attendance]);
 
   const handleCallWorker = (phone: string) => {
     const cleanPhone = phone.replace(/[^0-9+]/g, "");
@@ -152,12 +198,15 @@ export default function ManagerTeamScreen() {
               const activeTask = data.tasks.find(
                 (t) => t.assignedToUserId === emp.id && t.status !== "COMPLETED"
               );
-              const isCheckedIn = data.attendance.some(
-                (a) =>
-                  a.employeeId === emp.id &&
-                  a.checkInAt.startsWith(new Date().toISOString().slice(0, 10)) &&
-                  !a.checkOutAt
-              );
+              const serverRecord = teamAttendanceMap.get(emp.id);
+              const isCheckedIn = serverRecord
+                ? !serverRecord.checkOutAt
+                : data.attendance.some(
+                    (a) =>
+                      a.employeeId === emp.id &&
+                      a.checkInAt.startsWith(new Date().toISOString().slice(0, 10)) &&
+                      !a.checkOutAt
+                  );
 
               return (
                 <Surface key={emp.id} style={styles.teamCard}>

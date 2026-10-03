@@ -5,6 +5,7 @@ import { trpcClient } from "@/lib/trpc";
 export type OperationType =
   | "ATTENDANCE_CHECK_IN"
   | "ATTENDANCE_CHECK_OUT"
+  | "UPLOAD_SELFIE"
   | "GPS_POINT"
   | "TASK_CREATE"
   | "TASK_UPDATE"
@@ -30,7 +31,26 @@ export interface QueuedOperation<T = any> {
   priority: "high" | "normal" | "low";
 }
 
-const OFFLINE_QUEUE_STORAGE_KEY = "@fieldpulse_offline_queue_v2";
+let _currentQueueUserId: string | null = null;
+let _isFlushingQueue = false;
+let _isQueuePausedForAuth = false;
+
+export function setOfflineQueueUserId(userId: string | number | null) {
+  _currentQueueUserId = userId ? String(userId) : null;
+}
+
+export function isQueuePaused(): boolean {
+  return _isQueuePausedForAuth;
+}
+
+export function resumeQueue(): void {
+  _isQueuePausedForAuth = false;
+}
+
+function getQueueStorageKey(): string {
+  return _currentQueueUserId ? `@fieldpulse_offline_queue_u_${_currentQueueUserId}` : "@fieldpulse_offline_queue_v2";
+}
+
 const MAX_RETRY_ATTEMPTS = 5;
 
 function generateOperationId(type: string): string {
@@ -42,7 +62,7 @@ function generateOperationId(type: string): string {
  */
 export async function getOfflineQueue(): Promise<QueuedOperation[]> {
   try {
-    const raw = await AsyncStorage.getItem(OFFLINE_QUEUE_STORAGE_KEY);
+    const raw = await AsyncStorage.getItem(getQueueStorageKey());
     if (!raw) return [];
     return JSON.parse(raw) as QueuedOperation[];
   } catch (err) {
@@ -56,9 +76,22 @@ export async function getOfflineQueue(): Promise<QueuedOperation[]> {
  */
 export async function saveOfflineQueue(queue: QueuedOperation[]): Promise<void> {
   try {
-    await AsyncStorage.setItem(OFFLINE_QUEUE_STORAGE_KEY, JSON.stringify(queue));
+    await AsyncStorage.setItem(getQueueStorageKey(), JSON.stringify(queue));
   } catch (err) {
     console.error("[OfflineSync] Failed to save queue:", err);
+  }
+}
+
+/**
+ * Clear queue completely on logout.
+ */
+export async function clearOfflineQueue(): Promise<void> {
+  try {
+    await AsyncStorage.removeItem(getQueueStorageKey());
+    await AsyncStorage.removeItem("@fieldpulse_offline_queue_v2");
+    _isQueuePausedForAuth = false;
+  } catch (err) {
+    console.error("[OfflineSync] Failed to clear queue:", err);
   }
 }
 
@@ -130,60 +163,109 @@ export type OperationSyncHandler = (operation: QueuedOperation) => Promise<boole
 
 /**
  * Flush all pending queue operations using the provided handler.
+ * Includes flush mutex, auth failure pause, and 4xx dead-lettering.
  */
 export async function flushOfflineQueue(
-  handler: OperationSyncHandler
+  handler: OperationSyncHandler = dispatchQueuedOperation
 ): Promise<{ processed: number; succeeded: number; failed: number }> {
-  try {
-    const netState = await Network.getNetworkStateAsync();
-    if (!netState.isConnected || !netState.isInternetReachable) {
-      return { processed: 0, succeeded: 0, failed: 0 };
-    }
-  } catch {
-    // If Network check is unavailable (e.g. web/test), proceed
+  if (_isFlushingQueue) {
+    return { processed: 0, succeeded: 0, failed: 0 };
   }
-
-  const queue = await getOfflineQueue();
-  const pending = queue.filter((op) => op.status === "queued" || op.status === "failed");
-
-  if (pending.length === 0) {
+  if (_isQueuePausedForAuth) {
     return { processed: 0, succeeded: 0, failed: 0 };
   }
 
-  let succeeded = 0;
-  let failed = 0;
-
-  for (const op of pending) {
-    await updateOperationStatus(op.operationId, {
-      status: "syncing",
-      lastAttemptAt: new Date().toISOString(),
-      attemptCount: op.attemptCount + 1,
-    });
-
+  _isFlushingQueue = true;
+  try {
     try {
-      const success = await handler(op);
-      if (success) {
-        await removeOperation(op.operationId);
-        succeeded++;
-      } else {
-        const nextAttempts = op.attemptCount + 1;
-        await updateOperationStatus(op.operationId, {
-          status: nextAttempts >= MAX_RETRY_ATTEMPTS ? "dead_letter" : "failed",
-          error: "Server rejected or unhandled response",
-        });
-        failed++;
+      const netState = await Network.getNetworkStateAsync();
+      if (!netState.isConnected || !netState.isInternetReachable) {
+        return { processed: 0, succeeded: 0, failed: 0 };
       }
-    } catch (err: any) {
-      const nextAttempts = op.attemptCount + 1;
-      await updateOperationStatus(op.operationId, {
-        status: nextAttempts >= MAX_RETRY_ATTEMPTS ? "dead_letter" : "failed",
-        error: err?.message || String(err),
-      });
-      failed++;
+    } catch {
+      // If Network check is unavailable (e.g. web/test), proceed
     }
-  }
 
-  return { processed: pending.length, succeeded, failed };
+    const queue = await getOfflineQueue();
+    const pending = queue.filter((op) => op.status === "queued" || op.status === "failed");
+
+    if (pending.length === 0) {
+      return { processed: 0, succeeded: 0, failed: 0 };
+    }
+
+    let succeeded = 0;
+    let failed = 0;
+
+    for (const op of pending) {
+      await updateOperationStatus(op.operationId, {
+        status: "syncing",
+        lastAttemptAt: new Date().toISOString(),
+      });
+
+      try {
+        const success = await handler(op);
+        if (success) {
+          await removeOperation(op.operationId);
+          succeeded++;
+        } else {
+          const nextAttempts = op.attemptCount + 1;
+          await updateOperationStatus(op.operationId, {
+            attemptCount: nextAttempts,
+            status: nextAttempts >= MAX_RETRY_ATTEMPTS ? "dead_letter" : "failed",
+            error: "Server rejected or unhandled response",
+          });
+          failed++;
+        }
+      } catch (err: any) {
+        const errMsg = err?.message || String(err);
+        const errCode = err?.data?.code || err?.code || "";
+
+        // Check if authentication error: UNAUTHORIZED / 401
+        const isAuthError = errCode === "UNAUTHORIZED" || errMsg.toLowerCase().includes("unauthorized") || errMsg.includes("401");
+        if (isAuthError) {
+          // Pause queue, do NOT increment dead-letter attempt count
+          _isQueuePausedForAuth = true;
+          await updateOperationStatus(op.operationId, {
+            status: "queued",
+            error: "Session expired or unauthorized. Please re-login to resume sync.",
+          });
+          failed++;
+          break; // Stop flushing remaining ops until user logs in
+        }
+
+        // Check if validation or permission error: FORBIDDEN / BAD_REQUEST (403, 400)
+        const isClient4xx =
+          errCode === "FORBIDDEN" ||
+          errCode === "BAD_REQUEST" ||
+          errCode === "PARSE_ERROR" ||
+          errMsg.toLowerCase().includes("forbidden") ||
+          errMsg.includes("403") ||
+          errMsg.includes("400");
+
+        if (isClient4xx) {
+          // Dead-letter immediately with visible reason
+          await updateOperationStatus(op.operationId, {
+            status: "dead_letter",
+            error: `Rejected by server (${errCode || "4xx"}): ${errMsg}`,
+          });
+          failed++;
+        } else {
+          // Network error or server 5xx: increment attempt count and retry with backoff
+          const nextAttempts = op.attemptCount + 1;
+          await updateOperationStatus(op.operationId, {
+            attemptCount: nextAttempts,
+            status: nextAttempts >= MAX_RETRY_ATTEMPTS ? "dead_letter" : "failed",
+            error: errMsg,
+          });
+          failed++;
+        }
+      }
+    }
+
+    return { processed: pending.length, succeeded, failed };
+  } finally {
+    _isFlushingQueue = false;
+  }
 }
 
 /**
@@ -305,9 +387,6 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
         checkInAccuracy: p.checkInAccuracy !== undefined && p.checkInAccuracy !== null ? Math.round(Number(p.checkInAccuracy)) : undefined,
         operationId: op.operationId || p.operationId,
         isMocked: p.isMocked,
-        targetLat: p.targetLat ? String(p.targetLat) : undefined,
-        targetLng: p.targetLng ? String(p.targetLng) : undefined,
-        geofenceRadiusMeters: p.geofenceRadiusMeters !== undefined && p.geofenceRadiusMeters !== null ? Number(p.geofenceRadiusMeters) : undefined,
         clientCheckInAt: p.clientCheckInAt || op.createdAt,
       });
       await markRecordSyncedInStorage(op);
@@ -324,6 +403,52 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
       return true;
     }
 
+    case "UPLOAD_SELFIE": {
+      const { getApiBaseUrl } = await import("@/constants/oauth");
+      const { getSessionToken } = await import("@/lib/_core/auth");
+      const apiBase = getApiBaseUrl();
+      if (!apiBase) throw new Error("API base URL not configured");
+      const token = await getSessionToken();
+      const res = await fetch(`${apiBase}/api/upload-selfie`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          base64: p.base64,
+          action: p.action,
+        }),
+      });
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => null);
+        throw new Error(errJson?.error || `Upload failed with HTTP ${res.status}`);
+      }
+      const uploadRes = await res.json();
+      const serverUrl = uploadRes.url;
+
+      if (p.nextAction === "ATTENDANCE_CHECK_IN") {
+        await trpcClient.attendance.checkIn.mutate({
+          ...p.attendancePayload,
+          checkInPhotoUri: serverUrl,
+          operationId: op.operationId,
+        });
+      } else if (p.nextAction === "ATTENDANCE_CHECK_OUT") {
+        await trpcClient.attendance.checkOut.mutate({
+          ...p.attendancePayload,
+          checkOutPhotoUri: serverUrl,
+          operationId: op.operationId,
+        });
+      } else if (p.nextAction === "VISIT_EVIDENCE") {
+        await trpcClient.visits.addEvidence.mutate({
+          ...p.visitPayload,
+          photoUri: serverUrl,
+        });
+      }
+      await markRecordSyncedInStorage(op);
+      return true;
+    }
+
     case "GPS_POINT": {
       const recordedDate = p.recordedDate || (p.capturedAt ? p.capturedAt.slice(0, 10) : new Date(op.createdAt).toISOString().slice(0, 10));
       await trpcClient.tracking.recordPoint.mutate({
@@ -332,6 +457,8 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
         longitude: String(p.longitude),
         accuracy: p.accuracy !== undefined && p.accuracy !== null ? Math.round(Number(p.accuracy)) : undefined,
         address: p.address,
+        operationId: op.operationId || p.operationId,
+        capturedAt: p.capturedAt || op.createdAt,
       });
       await markRecordSyncedInStorage(op);
       return true;
@@ -352,6 +479,7 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
         locationLng: p.locationLng ? String(p.locationLng) : undefined,
         locationAddress: p.locationAddress,
         customerName: p.customerName,
+        operationId: op.operationId || p.operationId,
       });
       await markRecordSyncedInStorage(op);
       return true;
@@ -375,6 +503,7 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
         latitude: p.latitude !== undefined && p.latitude !== null ? String(p.latitude) : undefined,
         longitude: p.longitude !== undefined && p.longitude !== null ? String(p.longitude) : undefined,
         notes: p.notes,
+        operationId: op.operationId || p.operationId,
       });
       await markRecordSyncedInStorage(op);
       return true;
@@ -403,6 +532,7 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
         employeeUserId: empId && !isNaN(empId) ? empId : undefined,
         scheduledFor: p.scheduledFor ? new Date(p.scheduledFor).toISOString() : new Date().toISOString(),
         notes: p.notes,
+        operationId: op.operationId || p.operationId,
       });
       await markRecordSyncedInStorage(op);
       return true;
@@ -460,6 +590,7 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
         description: p.description,
         receiptUrl: p.receiptUrl,
         expenseDate: p.expenseDate || new Date().toISOString().slice(0, 10),
+        operationId: op.operationId || p.operationId,
       });
       await markRecordSyncedInStorage(op);
       return true;
@@ -475,6 +606,7 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
       await trpcClient.chat.sendMessage.mutate({
         channelId,
         message: String(p.message || p.text),
+        operationId: op.operationId || p.operationId,
       });
       await markRecordSyncedInStorage(op);
       return true;

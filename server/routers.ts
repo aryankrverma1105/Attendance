@@ -56,82 +56,50 @@ export const appRouter = router({
           }
 
           const db = await getDb();
-          let user;
-
           if (!db) {
-            if (process.env.NODE_ENV === "production") {
-              console.error("[Database] Database connection unavailable in production.");
-              throw new TRPCError({
-                code: "INTERNAL_SERVER_ERROR",
-                message: "Database connection unavailable. Please contact system administrator.",
-              });
-            }
-            console.warn("[Database] Database not connected. Using in-memory preview fallback.");
-            user = {
-              id: 9999,
-              openId: `firebase_${decodedToken.uid}`,
-              firebaseUid: decodedToken.uid,
-              phoneE164,
-              name: phoneE164.split("@")[0] || "Employee",
-              role: "admin" as const,
-              accountStatus: "active" as const,
-              dailyWage: 0,
-              managerId: null,
-              createdAt: new Date(),
-              updatedAt: new Date(),
-              lastSignedIn: new Date(),
-            };
-          } else {
-            try {
-              const invitation = await getActiveInvitationByPhone(phoneE164);
+            throw new TRPCError({
+              code: "INTERNAL_SERVER_ERROR",
+              message: "Database connection unavailable. Please contact system administrator.",
+            });
+          }
 
-              if (invitation) {
-                user = await activateUserFromInvitation(
-                  invitation.id,
-                  decodedToken.uid,
-                  phoneE164,
-                  phoneE164.split("@")[0] || "Employee",
-                  invitation.role
-                );
-              } else {
-                user = await autoActivateUser(
-                  decodedToken.uid,
-                  phoneE164,
-                  phoneE164.split("@")[0] || "Employee"
-                );
-              }
-            } catch (dbError) {
-              if (process.env.NODE_ENV === "production") {
-                console.error("[Database] Query failed in production:", dbError);
-                throw new TRPCError({
-                  code: "INTERNAL_SERVER_ERROR",
-                  message: "Database query failed during user activation",
-                });
-              }
-              console.warn("[Database] Query failed, falling back to in-memory preview user:", dbError);
-              user = {
-                id: 9999,
-                openId: `firebase_${decodedToken.uid}`,
-                firebaseUid: decodedToken.uid,
-                phoneE164,
-                name: phoneE164.split("@")[0] || "Employee",
-                role: "admin" as const,
-                accountStatus: "active" as const,
-                dailyWage: 0,
-                managerId: null,
-                createdAt: new Date(),
-                updatedAt: new Date(),
-                lastSignedIn: new Date(),
-              };
-            }
+          let user;
+          const invitation = await getActiveInvitationByPhone(phoneE164);
+
+          if (invitation) {
+            user = await activateUserFromInvitation(
+              invitation.id,
+              decodedToken.uid,
+              phoneE164,
+              phoneE164.split("@")[0] || "Employee",
+              invitation.role
+            );
+          } else {
+            user = await autoActivateUser(
+              decodedToken.uid,
+              phoneE164,
+              phoneE164.split("@")[0] || "Employee"
+            );
           }
 
           if (!user) {
-            throw new Error("Failed to activate user account");
+            throw new TRPCError({
+              code: "FORBIDDEN",
+              message: "Account not authorized. Contact an administrator to be registered.",
+            });
+          }
+
+          // Enforce active status
+          if (user.accountStatus === "suspended" || user.accountStatus === "removed") {
+            throw new TRPCError({
+              code: "FORBIDDEN",
+              message: "Account has been suspended or removed by an administrator.",
+            });
           }
 
           const sessionToken = await sdk.createSessionToken(user.openId, {
             name: user.name || user.email || user.phoneE164 || "Employee",
+            tokenVersion: user.tokenVersion ?? 1,
           });
 
           const cookieOptions = getSessionCookieOptions(ctx.req);
@@ -504,6 +472,7 @@ export const appRouter = router({
           locationLng: z.string().optional(),
           locationAddress: z.string().optional(),
           customerName: z.string().optional(),
+          operationId: z.string().optional(),
         })
       )
       .mutation(async ({ ctx, input }) => {
@@ -544,9 +513,6 @@ export const appRouter = router({
           checkInAccuracy: z.number().optional(),
           operationId: z.string().optional(),
           isMocked: z.boolean().optional(),
-          targetLat: z.string().optional(),
-          targetLng: z.string().optional(),
-          geofenceRadiusMeters: z.number().optional(),
           clientCheckInAt: z.string().optional(),
         })
       )
@@ -599,6 +565,32 @@ export const appRouter = router({
         const { getAttendanceRecords } = await import("./db");
         return await getAttendanceRecords(ctx.user, input.targetUserId, input.month, input.year);
       }),
+
+    /**
+     * Review flagged attendance record (Manager/Admin).
+     */
+    reviewRecord: protectedProcedure
+      .input(
+        z.object({
+          recordId: z.string(),
+          decision: z.enum(["approved", "rejected"]),
+          notes: z.string().optional(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { reviewAttendanceRecord } = await import("./db");
+        return await reviewAttendanceRecord(ctx.user, input);
+      }),
+
+    /**
+     * Returns team attendance for managers and admins.
+     */
+    getTeamAttendance: protectedProcedure
+      .input(z.object({ date: z.string().optional() }).optional())
+      .query(async ({ ctx, input }) => {
+        const { getTeamAttendance } = await import("./db");
+        return await getTeamAttendance(ctx.user, input?.date);
+      }),
   }),
 
   tracking: router({
@@ -629,6 +621,8 @@ export const appRouter = router({
           longitude: z.string(),
           accuracy: z.number().optional(),
           address: z.string().optional(),
+          operationId: z.string().optional(),
+          capturedAt: z.string().optional(),
         })
       )
       .mutation(async ({ ctx, input }) => {
@@ -707,6 +701,7 @@ export const appRouter = router({
           latitude: z.string().optional(),
           longitude: z.string().optional(),
           notes: z.string().optional(),
+          operationId: z.string().optional(),
         })
       )
       .mutation(async ({ ctx, input }) => {
@@ -754,6 +749,7 @@ export const appRouter = router({
           employeeUserId: z.number().optional(),
           scheduledFor: z.string(),
           notes: z.string().optional(),
+          operationId: z.string().optional(),
         })
       )
       .mutation(async ({ ctx, input }) => {
@@ -763,6 +759,7 @@ export const appRouter = router({
           employeeUserId: input.employeeUserId,
           scheduledFor: new Date(input.scheduledFor),
           notes: input.notes,
+          operationId: input.operationId,
         });
       }),
     checkIn: protectedProcedure
@@ -847,10 +844,10 @@ export const appRouter = router({
         return await getChannelMessages(ctx.user, input.channelId, input.limit);
       }),
     sendMessage: protectedProcedure
-      .input(z.object({ channelId: z.string(), message: z.string().min(1) }))
+      .input(z.object({ channelId: z.string(), message: z.string().min(1), operationId: z.string().optional() }))
       .mutation(async ({ ctx, input }) => {
         const { sendChatMessage } = await import("./db");
-        return await sendChatMessage(ctx.user, input.channelId, input.message);
+        return await sendChatMessage(ctx.user, input.channelId, input.message, input.operationId);
       }),
   }),
 
@@ -867,6 +864,7 @@ export const appRouter = router({
           description: z.string().optional(),
           receiptUrl: z.string().optional(),
           expenseDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+          operationId: z.string().optional(),
         })
       )
       .mutation(async ({ ctx, input }) => {
