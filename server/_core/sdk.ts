@@ -1,5 +1,5 @@
 import { AXIOS_TIMEOUT_MS, COOKIE_NAME, ONE_YEAR_MS } from "../../shared/const.js";
-import { ForbiddenError } from "../../shared/_core/errors.js";
+import { ForbiddenError, UnauthorizedError } from "../../shared/_core/errors.js";
 import axios, { type AxiosInstance } from "axios";
 import { parse as parseCookieHeader } from "cookie";
 import type { Request } from "express";
@@ -251,14 +251,14 @@ class SDKServer {
     const session = await this.verifySession(sessionCookie);
 
     if (!session) {
-      throw ForbiddenError("Invalid session cookie");
+      throw UnauthorizedError("Invalid or missing session token");
     }
 
     if (session.openId.startsWith(CRON_OPEN_ID_PREFIX)) {
       const userInfo = await this.getUserInfoWithJwt(sessionCookie ?? "");
       const taskUid = userInfo.taskUid ?? null;
       if (!taskUid) {
-        throw ForbiddenError("Cron session missing task_uid");
+        throw UnauthorizedError("Cron session missing task_uid");
       }
       return buildCronUser(userInfo);
     }
@@ -281,30 +281,38 @@ class SDKServer {
         user = await db.getUserByOpenId(userInfo.openId);
       } catch (error) {
         console.error("[Auth] Failed to sync user from OAuth:", error);
-        throw ForbiddenError("Failed to sync user info");
+        throw UnauthorizedError("Failed to sync user info");
       }
     }
 
     if (!user) {
-      throw ForbiddenError("User not found");
+      throw UnauthorizedError("User not found");
     }
 
-    // Reject suspended or removed users immediately
+    // Reject suspended or removed users immediately (403 Forbidden)
     if (user.accountStatus === "suspended" || user.accountStatus === "removed") {
       throw ForbiddenError("Account has been suspended or removed by an administrator");
     }
 
-    // Check session tokenVersion against user.tokenVersion in DB (Session Revocation)
+    // Check session tokenVersion against user.tokenVersion in DB (Session Revocation - 401 Unauthorized)
     const userTokenVersion = user.tokenVersion ?? 1;
     const sessionTokenVersion = session.tokenVersion ?? 1;
     if (sessionTokenVersion !== userTokenVersion) {
-      throw ForbiddenError("Session has been revoked by an administrator");
+      throw UnauthorizedError("Session has been revoked by an administrator");
     }
 
-    await db.upsertUser({
-      openId: user.openId,
-      lastSignedIn: signedInAt,
-    });
+    // Only update lastSignedIn if the stored value is older than 10 minutes (Group 10 hardening)
+    const TEN_MINUTES_MS = 10 * 60 * 1000;
+    const shouldUpdateLastSignedIn =
+      !user.lastSignedIn ||
+      signedInAt.getTime() - new Date(user.lastSignedIn).getTime() > TEN_MINUTES_MS;
+
+    if (shouldUpdateLastSignedIn) {
+      await db.upsertUser({
+        openId: user.openId,
+        lastSignedIn: signedInAt,
+      });
+    }
 
     return user;
   }

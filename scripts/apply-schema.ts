@@ -72,6 +72,22 @@ async function migrate() {
   await addCol("chat_messages", "operationId", "varchar(128) NULL");
   await addUnique("chat_messages", "chat_messages_operationId_unique", "operationId");
 
+  try {
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS sites (
+        id varchar(36) PRIMARY KEY,
+        name varchar(255) NOT NULL,
+        lat double NOT NULL,
+        lng double NOT NULL,
+        geofence_radius_m double NOT NULL DEFAULT 100,
+        created_at timestamp DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log("sites table verified/created");
+  } catch (e: any) {
+    console.warn("Could not create sites table:", e.message);
+  }
+
   console.log("Database schema successfully upgraded!");
   process.exit(0);
 }

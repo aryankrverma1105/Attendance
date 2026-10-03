@@ -56,6 +56,7 @@ function formatE164(p: string): string {
 export const passwordLoginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 5,
+  skipSuccessfulRequests: true,
   standardHeaders: true,
   legacyHeaders: false,
   validate: { keyGeneratorIpFallback: false },
@@ -321,6 +322,24 @@ export function initUserSync(app: Express) {
       const db = await getDb();
       if (!db) return res.status(503).json({ success: false, error: "Database unavailable" });
 
+      const VALID_ROLES = ["admin", "manager", "employee"] as const;
+      const VALID_ACCOUNT_STATUSES = ["invited", "active", "suspended", "removed"] as const;
+
+      for (const u of incomingList) {
+        if (u.role && !VALID_ROLES.includes(u.role)) {
+          return res.status(400).json({
+            success: false,
+            error: `Invalid role "${u.role}". Must be one of: ${VALID_ROLES.join(", ")}`,
+          });
+        }
+        if (u.status && !VALID_ACCOUNT_STATUSES.includes(u.status)) {
+          return res.status(400).json({
+            success: false,
+            error: `Invalid status "${u.status}". Must be one of: ${VALID_ACCOUNT_STATUSES.join(", ")}`,
+          });
+        }
+      }
+
       for (const u of incomingList) {
         const phone = formatE164(u.identifier || u.phoneE164 || "");
         if (!phone) continue;
@@ -333,28 +352,54 @@ export function initUserSync(app: Express) {
             passwordHash = await bcrypt.hash(u.password.trim(), 10);
           }
 
+          const targetRole = u.role || "employee";
+          const targetStatus = u.status || "active";
+
           await db.insert(users).values({
             openId,
             phoneE164: phone,
             name: u.displayName || u.name || "Employee",
-            role: u.role || "employee",
-            accountStatus: u.status === "suspended" ? "suspended" : "active",
+            role: targetRole,
+            accountStatus: targetStatus,
             dailyWage: u.dailyWage || 0,
             loginMethod: "password",
             passwordHash,
+            tokenVersion: 1,
           });
         } else {
-          const updateData: any = {
-            name: u.displayName || u.name || existing[0].name,
-            role: u.role || existing[0].role,
-            accountStatus: u.status === "suspended" ? "suspended" : "active",
-            dailyWage: u.dailyWage !== undefined ? u.dailyWage : existing[0].dailyWage,
-          };
-          if (u.password && typeof u.password === "string" && u.password.trim()) {
-            updateData.passwordHash = await bcrypt.hash(u.password.trim(), 10);
+          const existingUser = existing[0];
+          const targetRole = u.role || existingUser.role;
+
+          // Never change a user whose accountStatus is "removed" back to "active"
+          let targetStatus = existingUser.accountStatus;
+          if (u.status) {
+            if (existingUser.accountStatus === "removed" && (u.status === "active" || u.status === "invited")) {
+              targetStatus = "removed";
+            } else {
+              targetStatus = u.status;
+            }
           }
 
-          await db.update(users).set(updateData).where(eq(users.id, existing[0].id));
+          const updateData: any = {
+            name: u.displayName || u.name || existingUser.name,
+            role: targetRole,
+            accountStatus: targetStatus,
+            dailyWage: u.dailyWage !== undefined ? u.dailyWage : existingUser.dailyWage,
+          };
+
+          let passwordChanged = false;
+          if (u.password && typeof u.password === "string" && u.password.trim()) {
+            updateData.passwordHash = await bcrypt.hash(u.password.trim(), 10);
+            passwordChanged = true;
+          }
+
+          // Bump tokenVersion when a password is changed or an account is suspended
+          const accountSuspended = targetStatus === "suspended" && existingUser.accountStatus !== "suspended";
+          if (passwordChanged || accountSuspended) {
+            updateData.tokenVersion = (existingUser.tokenVersion ?? 1) + 1;
+          }
+
+          await db.update(users).set(updateData).where(eq(users.id, existingUser.id));
         }
       }
 

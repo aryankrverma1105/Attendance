@@ -49,11 +49,12 @@ export function getApiBaseUrl(): string {
     return `${protocol}//${hostname}${port ? `:${port}` : ""}`;
   }
 
-  // Native mobile: read from environment or default to secure HTTPS API domain
+  // Native mobile: read from environment; if empty, return empty string and log clear error
   if (process.env.EXPO_PUBLIC_API_BASE_URL) {
     return process.env.EXPO_PUBLIC_API_BASE_URL.replace(/\/$/, "");
   }
-  return "https://api.fieldpulse.app";
+  console.error("[API] EXPO_PUBLIC_API_BASE_URL is not configured. API unavailable.");
+  return "";
 }
 
 export const SESSION_TOKEN_KEY = "app_session_token";

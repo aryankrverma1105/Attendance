@@ -8,8 +8,20 @@ import {
   getExponentialBackoffMs,
   resetStuckSyncingOperations,
   dispatchQueuedOperation,
+  isQueuePaused,
+  resumeQueue,
+  SyncOperationError,
   type QueuedOperation,
 } from "../lib/offline-sync";
+import { trpcClient } from "@/lib/trpc";
+
+vi.mock("@/constants/oauth", () => ({
+  getApiBaseUrl: vi.fn(() => "https://api.example.com"),
+}));
+
+vi.mock("@/lib/_core/auth", () => ({
+  getSessionToken: vi.fn(async () => "test-token"),
+}));
 
 // Mock trpcClient
 vi.mock("@/lib/trpc", () => ({
@@ -241,5 +253,131 @@ describe("Offline Synchronization Engine", () => {
 
     const updatedWorkspace = JSON.parse(storage.get("fieldpulse.workspace.v1")!);
     expect(updatedWorkspace.tasks[0].syncState).toBe("synced");
+  });
+
+  it("throws typed SyncOperationError and dead-letters CHAT_MESSAGE when channelId is missing", async () => {
+    const chatOp = await enqueueOperation("CHAT_MESSAGE", { message: "orphan message" });
+    await expect(dispatchQueuedOperation(chatOp)).rejects.toThrow(SyncOperationError);
+
+    const flushResult = await flushOfflineQueue(dispatchQueuedOperation);
+    expect(flushResult.failed).toBe(1);
+
+    const queue = await getOfflineQueue();
+    expect(queue[0].status).toBe("dead_letter");
+    expect(queue[0].error).toContain("BAD_REQUEST");
+  });
+
+  it("handles UPLOAD_SELFIE -> VISIT_EVIDENCE calling visits.addEvidence with evidenceUrl", async () => {
+    const mockVisitEvidenceMutate = vi.fn(async () => ({ id: "ev-100" }));
+    (trpcClient.visits.addEvidence as any).mutate = mockVisitEvidenceMutate;
+
+    // Mock global fetch for selfie upload
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ url: "https://cdn.fieldpulse.app/evidence-photo.jpg" }),
+    })) as any;
+
+    try {
+      const uploadEvidenceOp = await enqueueOperation("UPLOAD_SELFIE", {
+        base64: "base64data",
+        action: "visit-evidence",
+        nextAction: "VISIT_EVIDENCE",
+        visitPayload: {
+          visitId: "visit-999",
+          latitude: "28.6139",
+          longitude: "77.2090",
+        },
+      });
+
+      const success = await dispatchQueuedOperation(uploadEvidenceOp);
+      expect(success).toBe(true);
+
+      expect(mockVisitEvidenceMutate).toHaveBeenCalledWith({
+        visitId: "visit-999",
+        evidenceUrl: "https://cdn.fieldpulse.app/evidence-photo.jpg",
+        latitude: "28.6139",
+        longitude: "77.2090",
+      });
+      // Verify photoUri is NOT sent
+      expect((mockVisitEvidenceMutate.mock.calls as any)[0][0]).not.toHaveProperty("photoUri");
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  describe("Error Classification and Queue Pause Logic", () => {
+    beforeEach(() => {
+      resumeQueue();
+    });
+
+    it("pauses queue on 401 or UNAUTHORIZED without dead-lettering, and resumeQueue unpauses", async () => {
+      await enqueueOperation("TASK_UPDATE", { taskId: "t-auth", status: "DONE" });
+
+      const authErrorHandler = vi.fn(async () => {
+        throw new SyncOperationError("Unauthorized session", { status: 401, code: "UNAUTHORIZED" });
+      });
+
+      expect(isQueuePaused()).toBe(false);
+      await flushOfflineQueue(authErrorHandler);
+
+      expect(isQueuePaused()).toBe(true);
+      const queue = await getOfflineQueue();
+      expect(queue[0].status).toBe("queued");
+      expect(queue[0].attemptCount).toBe(0); // Not incremented
+
+      // Queue is paused: subsequent flush returns immediately
+      const skippedFlush = await flushOfflineQueue(authErrorHandler);
+      expect(skippedFlush.processed).toBe(0);
+
+      // Calling resumeQueue unpauses
+      resumeQueue();
+      expect(isQueuePaused()).toBe(false);
+    });
+
+    it("pauses queue on REST 403 with auth message", async () => {
+      await enqueueOperation("TASK_UPDATE", { taskId: "t-rest-auth", status: "DONE" });
+
+      const restAuthHandler = vi.fn(async () => {
+        throw new SyncOperationError("Forbidden: token expired", { status: 403, isRestAuthMessage: true });
+      });
+
+      await flushOfflineQueue(restAuthHandler);
+      expect(isQueuePaused()).toBe(true);
+
+      const queue = await getOfflineQueue();
+      expect(queue[0].status).toBe("queued");
+    });
+
+    it("dead-letters client errors (400, 403, BAD_REQUEST, FORBIDDEN) immediately", async () => {
+      await enqueueOperation("TASK_UPDATE", { taskId: "t-bad", status: "INVALID" });
+
+      const badRequestHandler = vi.fn(async () => {
+        throw new SyncOperationError("Validation failed", { status: 400, code: "BAD_REQUEST" });
+      });
+
+      await flushOfflineQueue(badRequestHandler);
+
+      const queue = await getOfflineQueue();
+      expect(queue[0].status).toBe("dead_letter");
+      expect(queue[0].error).toContain("BAD_REQUEST");
+      expect(isQueuePaused()).toBe(false);
+    });
+
+    it("retries server 5xx and network errors with backoff", async () => {
+      await enqueueOperation("TASK_UPDATE", { taskId: "t-server-err", status: "DONE" });
+
+      const serverErrorHandler = vi.fn(async () => {
+        throw new SyncOperationError("Internal server error", { status: 500, code: "INTERNAL_SERVER_ERROR" });
+      });
+
+      await flushOfflineQueue(serverErrorHandler);
+
+      const queue = await getOfflineQueue();
+      expect(queue[0].status).toBe("failed");
+      expect(queue[0].attemptCount).toBe(1);
+      expect(isQueuePaused()).toBe(false);
+    });
   });
 });

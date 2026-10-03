@@ -1,7 +1,8 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { Platform } from "react-native";
+import { Platform, Alert } from "react-native";
 import * as SecureStore from "expo-secure-store";
+import { authedFetch } from "@/lib/_core/api";
 
 import type {
   AccountLifecycleEvent,
@@ -188,22 +189,10 @@ function buildPreviewSession(
 
 export async function syncUsersWithServer(usersToSync?: ManagedUser[]): Promise<ManagedUser[] | null> {
   try {
-    const apiBase = getApiBaseUrl();
-    if (!apiBase) return null;
-
-    let authHeaders: Record<string, string> = { "Content-Type": "application/json" };
-    try {
-      const { getSessionToken } = require("@/lib/_core/auth");
-      const token = await getSessionToken().catch(() => null);
-      if (token) {
-        authHeaders["Authorization"] = `Bearer ${token}`;
-      }
-    } catch {}
-
     if (usersToSync && usersToSync.length > 0) {
-      const res = await fetch(`${apiBase}/api/users/sync`, {
+      const res = await authedFetch(`/api/users/sync`, {
         method: "POST",
-        headers: authHeaders,
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ users: usersToSync }),
       });
       const resData = await res.json();
@@ -211,10 +200,7 @@ export async function syncUsersWithServer(usersToSync?: ManagedUser[]): Promise<
         return resData.users as ManagedUser[];
       }
     } else {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 4000);
-      const res = await fetch(`${apiBase}/api/users`, { signal: controller.signal });
-      clearTimeout(timeout);
+      const res = await authedFetch(`/api/users`);
       const resData = await res.json();
       if (resData?.success && Array.isArray(resData?.users)) {
         return resData.users as ManagedUser[];
@@ -802,10 +788,26 @@ export function FieldDataProvider({ children }: { children: ReactNode }) {
       return nextWorkspace;
     });
 
-    const apiBase = getApiBaseUrl();
-    if (apiBase) {
-      fetch(`${apiBase}/api/users/${userId}`, { method: "DELETE" }).catch(() => {});
-    }
+    authedFetch(`/api/users/${userId}`, { method: "DELETE" })
+      .catch((err) => {
+        console.error("[removeManagedUser] Server delete failed:", err);
+        setData((current) => {
+          if (current.managedUsers.some((u) => u.id === userId)) {
+            return current;
+          }
+          const rolledBackWorkspace = {
+            ...current,
+            managedUsers: [...current.managedUsers, target],
+            accountEvents: current.accountEvents.filter((ev) => ev.id !== event.id),
+          };
+          persistWorkspaceToStorage(rolledBackWorkspace);
+          return rolledBackWorkspace;
+        });
+        Alert.alert(
+          "Failed to Delete User",
+          err?.message || "Server rejected deletion. Local removal has been rolled back."
+        );
+      });
 
     return true;
   }, [data.managedUsers, data.session?.id, data.session?.identifier, data.session?.role]);

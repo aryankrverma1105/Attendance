@@ -36,6 +36,13 @@
       "when": 1789000000000,
       "tag": "0004_security_and_idempotency",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "5",
+      "when": 1789100000000,
+      "tag": "0005_sites",
+      "breakpoints": true
     }
   ]
 }

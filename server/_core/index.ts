@@ -1,5 +1,6 @@
 import "dotenv/config";
 import express from "express";
+import fs from "fs";
 import { createServer } from "http";
 import net from "net";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
@@ -94,10 +95,43 @@ async function startServer() {
   initSelfieStorage(app);
   initUserSync(app);
 
+  // Startup environment warnings
+  const fbServiceAccountPath = process.env.FIREBASE_SERVICE_ACCOUNT;
+  if (!fbServiceAccountPath) {
+    console.warn("⚠️  [Startup Warning] FIREBASE_SERVICE_ACCOUNT is unset. Phone OTP authentication and push notifications may fail.");
+  } else {
+    try {
+      if (!fs.existsSync(fbServiceAccountPath)) {
+        console.warn(`⚠️  [Startup Warning] FIREBASE_SERVICE_ACCOUNT file not found: ${fbServiceAccountPath}`);
+      } else {
+        const fileContent = fs.readFileSync(fbServiceAccountPath, "utf-8");
+        JSON.parse(fileContent);
+      }
+    } catch (e: any) {
+      console.warn(`⚠️  [Startup Warning] FIREBASE_SERVICE_ACCOUNT file is unreadable or invalid JSON: ${e.message}`);
+    }
+  }
+
+  if (!process.env.SUPER_ADMIN_PHONE) {
+    console.warn("⚠️  [Startup Warning] SUPER_ADMIN_PHONE is unset. Primary super administrator was not seeded.");
+  }
+
+  // Database connectivity and seeding
   try {
-    const { seedSuperAdmin } = await import("../db");
+    const { pingDb, seedSuperAdmin } = await import("../db");
+    if (isProd) {
+      const isDbAlive = await pingDb();
+      if (!isDbAlive) {
+        console.error("[Startup] FATAL: Production database ping failed. Server cannot start.");
+        process.exit(1);
+      }
+    }
     await seedSuperAdmin();
   } catch (err) {
+    if (isProd) {
+      console.error("[Startup] FATAL: Database initialization failed in production:", err);
+      process.exit(1);
+    }
     console.warn("[Startup] Failed to seed super admin:", err);
   }
 
@@ -107,9 +141,12 @@ async function startServer() {
 
   app.get("/api/ready", async (_req, res) => {
     try {
-      const { getDb } = await import("../db");
-      const db = await getDb();
-      res.json({ ok: true, status: "ready", dbConnected: !!db, timestamp: Date.now() });
+      const { pingDb } = await import("../db");
+      const isAlive = await pingDb();
+      if (!isAlive) {
+        return res.status(503).json({ ok: false, status: "unready", error: "Database ping failed" });
+      }
+      res.json({ ok: true, status: "ready", dbConnected: true, timestamp: Date.now() });
     } catch (err: any) {
       res.status(503).json({ ok: false, status: "unready", error: err?.message || String(err) });
     }
@@ -124,11 +161,17 @@ async function startServer() {
   );
 
   const preferredPort = parseInt(process.env.PORT || "3000");
-  const port = await findAvailablePort(preferredPort);
+  const isPreferredAvailable = await isPortAvailable(preferredPort);
 
-  if (port !== preferredPort) {
-    console.log(`Port ${preferredPort} is busy, using port ${port} instead`);
+  if (!isPreferredAvailable) {
+    if (isProd) {
+      console.error(`[Startup] FATAL: Preferred port ${preferredPort} is busy. Exiting in production.`);
+      process.exit(1);
+    }
+    console.log(`Port ${preferredPort} is busy, searching for alternative port...`);
   }
+
+  const port = isPreferredAvailable ? preferredPort : await findAvailablePort(preferredPort + 1);
 
   server.listen(port, () => {
     console.log(`[api] server listening on port ${port}`);

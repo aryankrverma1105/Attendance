@@ -71,6 +71,35 @@ export async function getDb() {
   return _db;
 }
 
+export function getDbPool(): mysql.Pool | null {
+  return _pool;
+}
+
+/**
+ * Run SELECT 1 and ping through the MySQL pool to verify database connectivity.
+ */
+export async function pingDb(): Promise<boolean> {
+  const db = await getDb();
+  if (!db || !_pool) return false;
+  return new Promise((resolve) => {
+    _pool!.getConnection((err, connection) => {
+      if (err || !connection) {
+        return resolve(false);
+      }
+      connection.ping((pingErr) => {
+        if (pingErr) {
+          connection.release();
+          return resolve(false);
+        }
+        connection.query("SELECT 1", (queryErr) => {
+          connection.release();
+          resolve(!queryErr);
+        });
+      });
+    });
+  });
+}
+
 export async function upsertUser(user: InsertUser): Promise<void> {
   if (!user.openId) {
     throw new Error("User openId is required for upsert");

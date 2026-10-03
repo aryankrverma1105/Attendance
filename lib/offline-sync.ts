@@ -161,6 +161,20 @@ export function getExponentialBackoffMs(attemptCount: number): number {
 
 export type OperationSyncHandler = (operation: QueuedOperation) => Promise<boolean>;
 
+export class SyncOperationError extends Error {
+  status?: number;
+  code?: string;
+  isRestAuthMessage?: boolean;
+
+  constructor(message: string, options?: { status?: number; code?: string; isRestAuthMessage?: boolean }) {
+    super(message);
+    this.name = "SyncOperationError";
+    this.status = options?.status;
+    this.code = options?.code;
+    this.isRestAuthMessage = options?.isRestAuthMessage;
+  }
+}
+
 /**
  * Flush all pending queue operations using the provided handler.
  * Includes flush mutex, auth failure pause, and 4xx dead-lettering.
@@ -217,13 +231,18 @@ export async function flushOfflineQueue(
           failed++;
         }
       } catch (err: any) {
-        const errMsg = err?.message || String(err);
-        const errCode = err?.data?.code || err?.code || "";
+        const errStatus = err?.status;
+        const errCode = err?.code;
+        const isRestAuth = err?.isRestAuthMessage;
 
-        // Check if authentication error: UNAUTHORIZED / 401
-        const isAuthError = errCode === "UNAUTHORIZED" || errMsg.toLowerCase().includes("unauthorized") || errMsg.includes("401");
-        if (isAuthError) {
-          // Pause queue, do NOT increment dead-letter attempt count
+        // Classify errors by status/code only:
+        // 401 and UNAUTHORIZED, plus 403 on REST routes with an auth message, pause the queue
+        const isAuthPause =
+          errStatus === 401 ||
+          errCode === "UNAUTHORIZED" ||
+          (errStatus === 403 && isRestAuth);
+
+        if (isAuthPause) {
           _isQueuePausedForAuth = true;
           await updateOperationStatus(op.operationId, {
             status: "queued",
@@ -233,20 +252,18 @@ export async function flushOfflineQueue(
           break; // Stop flushing remaining ops until user logs in
         }
 
-        // Check if validation or permission error: FORBIDDEN / BAD_REQUEST (403, 400)
-        const isClient4xx =
-          errCode === "FORBIDDEN" ||
+        // 400/403/BAD_REQUEST dead-letter
+        const isDeadLetter =
+          errStatus === 400 ||
+          errStatus === 403 ||
           errCode === "BAD_REQUEST" ||
-          errCode === "PARSE_ERROR" ||
-          errMsg.toLowerCase().includes("forbidden") ||
-          errMsg.includes("403") ||
-          errMsg.includes("400");
+          errCode === "FORBIDDEN" ||
+          errCode === "PARSE_ERROR";
 
-        if (isClient4xx) {
-          // Dead-letter immediately with visible reason
+        if (isDeadLetter) {
           await updateOperationStatus(op.operationId, {
             status: "dead_letter",
-            error: `Rejected by server (${errCode || "4xx"}): ${errMsg}`,
+            error: `Rejected by server (${errCode || errStatus || "4xx"}): ${err.message || String(err)}`,
           });
           failed++;
         } else {
@@ -255,7 +272,7 @@ export async function flushOfflineQueue(
           await updateOperationStatus(op.operationId, {
             attemptCount: nextAttempts,
             status: nextAttempts >= MAX_RETRY_ATTEMPTS ? "dead_letter" : "failed",
-            error: errMsg,
+            error: err.message || String(err),
           });
           failed++;
         }
@@ -373,9 +390,37 @@ async function markRecordSyncedInStorage(op: QueuedOperation): Promise<void> {
 
 /**
  * Real tRPC dispatcher that maps every OperationType to its corresponding server mutation.
- * Returns true only on confirmed server success; throws/returns false on failure.
+ * Returns true only on confirmed server success; throws typed SyncOperationError carrying status and code on failure.
  */
 export async function dispatchQueuedOperation(op: QueuedOperation): Promise<boolean> {
+  try {
+    return await executeDispatchQueuedOperation(op);
+  } catch (err: any) {
+    if (err instanceof SyncOperationError) {
+      throw err;
+    }
+    const status =
+      err?.status ||
+      err?.data?.httpStatus ||
+      (err?.data?.code === "UNAUTHORIZED"
+        ? 401
+        : err?.data?.code === "FORBIDDEN"
+        ? 403
+        : err?.data?.code === "BAD_REQUEST"
+        ? 400
+        : undefined);
+    const code = err?.data?.code || err?.code;
+    const isRestAuth =
+      err?.isRestAuthMessage || (status === 403 && /auth|token|unauthorized/i.test(err?.message || ""));
+    throw new SyncOperationError(err?.message || "Operation failed", {
+      status: typeof status === "number" ? status : undefined,
+      code: typeof code === "string" ? code : undefined,
+      isRestAuthMessage: Boolean(isRestAuth),
+    });
+  }
+}
+
+async function executeDispatchQueuedOperation(op: QueuedOperation): Promise<boolean> {
   const p = op.payload ?? {};
 
   switch (op.type) {
@@ -407,7 +452,7 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
       const { getApiBaseUrl } = await import("@/constants/oauth");
       const { getSessionToken } = await import("@/lib/_core/auth");
       const apiBase = getApiBaseUrl();
-      if (!apiBase) throw new Error("API base URL not configured");
+      if (!apiBase) throw new SyncOperationError("API base URL not configured", { status: 503 });
       const token = await getSessionToken();
       const res = await fetch(`${apiBase}/api/upload-selfie`, {
         method: "POST",
@@ -422,7 +467,13 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
       });
       if (!res.ok) {
         const errJson = await res.json().catch(() => null);
-        throw new Error(errJson?.error || `Upload failed with HTTP ${res.status}`);
+        const errMsg = errJson?.error || `Upload failed with HTTP ${res.status}`;
+        const isAuthMsg = /auth|token|unauthorized/i.test(errMsg);
+        throw new SyncOperationError(errMsg, {
+          status: res.status,
+          code: res.status === 401 ? "UNAUTHORIZED" : res.status === 403 ? "FORBIDDEN" : res.status === 400 ? "BAD_REQUEST" : undefined,
+          isRestAuthMessage: res.status === 403 && isAuthMsg,
+        });
       }
       const uploadRes = await res.json();
       const serverUrl = uploadRes.url;
@@ -440,9 +491,15 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
           operationId: op.operationId,
         });
       } else if (p.nextAction === "VISIT_EVIDENCE") {
+        const visitPayload = p.visitPayload || {};
+        const visitId = String(visitPayload.visitId || p.visitId || "");
+        const lat = visitPayload.latitude ?? p.latitude;
+        const lng = visitPayload.longitude ?? p.longitude;
         await trpcClient.visits.addEvidence.mutate({
-          ...p.visitPayload,
-          photoUri: serverUrl,
+          visitId,
+          evidenceUrl: serverUrl,
+          latitude: lat !== undefined && lat !== null ? String(lat) : undefined,
+          longitude: lng !== undefined && lng !== null ? String(lng) : undefined,
         });
       }
       await markRecordSyncedInStorage(op);
@@ -467,7 +524,7 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
     case "TASK_CREATE": {
       const assignedToUserId = typeof p.assignedToUserId === "number" ? p.assignedToUserId : parseInt(p.assignedToUserId, 10);
       if (isNaN(assignedToUserId) || assignedToUserId <= 0) {
-        throw new Error(`Invalid assignedToUserId: ${p.assignedToUserId}`);
+        throw new SyncOperationError(`Invalid assignedToUserId: ${p.assignedToUserId}`, { status: 400, code: "BAD_REQUEST" });
       }
       await trpcClient.tasks.create.mutate({
         title: String(p.title),
@@ -597,14 +654,15 @@ export async function dispatchQueuedOperation(op: QueuedOperation): Promise<bool
     }
 
     case "CHAT_MESSAGE": {
-      let channelId = p.channelId;
+      const channelId = p.channelId;
       if (!channelId) {
-        const channel = await trpcClient.chat.getOrCreateChannel.mutate({ targetUserId: 1 });
-        channelId = channel?.id;
+        throw new SyncOperationError("Cannot send chat message: channelId is missing", {
+          status: 400,
+          code: "BAD_REQUEST",
+        });
       }
-      if (!channelId) throw new Error("Could not resolve chat channel");
       await trpcClient.chat.sendMessage.mutate({
-        channelId,
+        channelId: String(channelId),
         message: String(p.message || p.text),
         operationId: op.operationId || p.operationId,
       });

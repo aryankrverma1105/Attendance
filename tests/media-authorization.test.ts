@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { extractEvidenceOwnerId } from "../server/selfie-storage";
 
 describe("Secure Media Storage Authorization", () => {
   it("rejects malicious traversal characters in filename generation", () => {
@@ -20,21 +21,35 @@ describe("Secure Media Storage Authorization", () => {
     expect(validJpegCheck).toBe(true);
   });
 
-  it("enforces IDOR defense between different employees", () => {
-    const employeeA = { id: 101, role: "employee" };
-    const employeeB = { id: 102, role: "employee" };
-    const photoFilename = "selfie-102-1725439999-abcde.jpg";
+  it("extracts owner id from hyphenated action filenames and blocks IDOR access", () => {
+    const checkInFilename = "check-in-12-1710000000000-abc12.jpg";
+    const checkOutFilename = "check-out-12-1710000000000-xyz99.jpg";
+    const visitFilename = "visit-12-1710000000000-evidence1.jpg";
+    const invalidFilename = "random-file.jpg";
 
-    const parts = photoFilename.split("-");
-    const targetEmpId = parts[1];
+    expect(extractEvidenceOwnerId(checkInFilename)).toBe(12);
+    expect(extractEvidenceOwnerId(checkOutFilename)).toBe(12);
+    expect(extractEvidenceOwnerId(visitFilename)).toBe(12);
+    expect(extractEvidenceOwnerId(invalidFilename)).toBeNull();
 
-    // Employee B can access their own photo
-    const employeeBAccess = targetEmpId === String(employeeB.id);
-    expect(employeeBAccess).toBe(true);
+    // Employee 12 can view their own photos
+    const authEmployee12 = { id: 12, role: "employee" };
+    expect(extractEvidenceOwnerId(checkInFilename) === authEmployee12.id).toBe(true);
+    expect(extractEvidenceOwnerId(checkOutFilename) === authEmployee12.id).toBe(true);
+    expect(extractEvidenceOwnerId(visitFilename) === authEmployee12.id).toBe(true);
 
-    // Employee A is BLOCKED from Employee B's photo
-    const employeeAAccess = targetEmpId === String(employeeA.id);
-    expect(employeeAAccess).toBe(false);
+    // Another employee (id 99) is BLOCKED (403) from employee 12's photos
+    const authEmployee99 = { id: 99, role: "employee" };
+    expect(extractEvidenceOwnerId(checkInFilename) === authEmployee99.id).toBe(false);
+
+    // Manager scoping check:
+    const teamEmployee = { id: 12, managerId: 5 };
+    const otherEmployee = { id: 30, managerId: 8 };
+    const manager = { id: 5, role: "manager" };
+
+    const canManagerAccess = (mgrId: number, emp: { managerId: number }) => mgrId === emp.managerId;
+    expect(canManagerAccess(manager.id, teamEmployee)).toBe(true);
+    expect(canManagerAccess(manager.id, otherEmployee)).toBe(false);
   });
 
   it("strictly preserves recent media and only purges files past the 180-day threshold", () => {

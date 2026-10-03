@@ -2,6 +2,72 @@ import { Platform } from "react-native";
 import { getApiBaseUrl } from "@/constants/oauth";
 import * as Auth from "./auth";
 
+export class HttpError extends Error {
+  status: number;
+  body: any;
+  constructor(status: number, message: string, body?: any) {
+    super(message);
+    this.name = "HttpError";
+    this.status = status;
+    this.body = body;
+  }
+}
+
+/**
+ * Authenticated REST fetch helper:
+ * - On native: adds Authorization: Bearer <token>
+ * - On web: uses credentials: "include"
+ * - Prefixes getApiBaseUrl()
+ * - Throws typed HttpError containing HTTP status on non-2xx
+ */
+export async function authedFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const headers: Record<string, string> = {
+    ...((init.headers as Record<string, string>) || {}),
+  };
+
+  if (Platform.OS !== "web") {
+    const sessionToken = await Auth.getSessionToken();
+    if (sessionToken && !headers["Authorization"] && !headers["authorization"]) {
+      headers["Authorization"] = `Bearer ${sessionToken}`;
+    }
+  }
+
+  const baseUrl = getApiBaseUrl();
+  const cleanBaseUrl = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
+  const cleanPath = path.startsWith("/") ? path : `/${path}`;
+  const url = baseUrl ? `${cleanBaseUrl}${cleanPath}` : path;
+
+  const response = await fetch(url, {
+    ...init,
+    headers,
+    credentials: "include",
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    let errorMessage = errorText;
+    let parsedBody: any = null;
+    try {
+      parsedBody = JSON.parse(errorText);
+      errorMessage = parsedBody.error || parsedBody.message || errorText;
+    } catch {
+      // Non-JSON response text
+    }
+
+    if (response.status === 401) {
+      Auth.handleGlobalUnauthorized(path).catch(() => {});
+    }
+
+    throw new HttpError(
+      response.status,
+      errorMessage || `HTTP ${response.status}: ${response.statusText}`,
+      parsedBody
+    );
+  }
+
+  return response;
+}
+
 type ApiResponse<T> = {
   data?: T;
   error?: string;

@@ -29,12 +29,34 @@ export function createTRPCClient() {
           const token = await Auth.getSessionToken();
           return token ? { Authorization: `Bearer ${token}` } : {};
         },
-        // Custom fetch to include credentials for cookie-based auth
-        fetch(url, options) {
-          return fetch(url, {
+        // Custom fetch to include credentials for cookie-based auth and intercept 401s
+        async fetch(url, options) {
+          const res = await fetch(url, {
             ...options,
             credentials: "include",
           });
+
+          if (res.status === 401) {
+            const urlStr = String(url);
+            Auth.handleGlobalUnauthorized(urlStr).catch(() => {});
+          } else {
+            try {
+              const clone = res.clone();
+              const json = await clone.json();
+              const items = Array.isArray(json) ? json : [json];
+              const isUnauthorized = items.some(
+                (item) => item?.error?.data?.code === "UNAUTHORIZED" || item?.error?.data?.httpStatus === 401
+              );
+              if (isUnauthorized) {
+                const urlStr = String(url);
+                Auth.handleGlobalUnauthorized(urlStr).catch(() => {});
+              }
+            } catch {
+              // ignore clone json parse error
+            }
+          }
+
+          return res;
         },
       }),
     ],

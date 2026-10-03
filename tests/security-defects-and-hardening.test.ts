@@ -68,6 +68,9 @@ describe("Security Defects Remediations & Production Hardening", () => {
             },
             setHeader() {},
             getHeader() {},
+            on() { return this; },
+            once() { return this; },
+            emit() { return true; },
           };
           passwordLoginLimiter(reqObj as Request, resObj as Response, () => {
             resolve({ status: 200 });

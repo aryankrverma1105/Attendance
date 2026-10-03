@@ -47,27 +47,63 @@ export function useAuth(options?: UseAuthOptions) {
       }
 
       // Native platform: use token-based auth
-      console.log("[useAuth] Native platform: checking for session token...");
       const sessionToken = await Auth.getSessionToken();
-      console.log(
-        "[useAuth] Session token:",
-        sessionToken ? `present (${sessionToken.substring(0, 20)}...)` : "missing",
-      );
       if (!sessionToken) {
-        console.log("[useAuth] No session token, setting user to null");
         setUser(null);
         return;
       }
 
-      // Use cached user info for native (token validates the session)
+      // Use cached user info for native
       const cachedUser = await Auth.getUserInfo();
-      console.log("[useAuth] Cached user:", cachedUser);
       if (cachedUser) {
-        console.log("[useAuth] Using cached user info");
         setUser(cachedUser);
+      }
+
+      // On native app start, if online, validate the cached session via GET /api/auth/me; on 401/403 log out. If offline, keep the cached user.
+      let isOnline = false;
+      try {
+        const Network = await import("expo-network");
+        const netState = await Network.getNetworkStateAsync();
+        isOnline = Boolean(netState.isConnected && netState.isInternetReachable);
+      } catch {
+        isOnline = true;
+      }
+
+      if (isOnline) {
+        try {
+          const res = await Api.authedFetch("/api/auth/me");
+          const resData = await res.json();
+          if (resData?.user) {
+            const validatedUser: Auth.User = {
+              id: resData.user.id,
+              openId: resData.user.openId,
+              name: resData.user.name,
+              email: resData.user.email,
+              loginMethod: resData.user.loginMethod,
+              lastSignedIn: new Date(resData.user.lastSignedIn),
+            };
+            setUser(validatedUser);
+            await Auth.setUserInfo(validatedUser);
+          } else {
+            await logout();
+            return;
+          }
+        } catch (err: any) {
+          const status = err?.status;
+          if (status === 401 || status === 403) {
+            await logout();
+            return;
+          }
+          // Network error or other non-auth error: keep cachedUser
+          if (!cachedUser) {
+            setUser(null);
+          }
+        }
       } else {
-        console.log("[useAuth] No cached user, setting user to null");
-        setUser(null);
+        // Offline: keep cached user
+        if (!cachedUser) {
+          setUser(null);
+        }
       }
     } catch (err) {
       const error = err instanceof Error ? err : new Error("Failed to fetch user");
@@ -76,7 +112,6 @@ export function useAuth(options?: UseAuthOptions) {
       setUser(null);
     } finally {
       setLoading(false);
-      console.log("[useAuth] fetchUser completed, loading:", false);
     }
   }, []);
 
@@ -89,36 +124,40 @@ export function useAuth(options?: UseAuthOptions) {
     } finally {
       await Auth.removeSessionToken();
       await Auth.clearUserInfo();
+      try {
+        const { resumeQueue } = await import("@/lib/offline-sync");
+        resumeQueue();
+      } catch {
+        // ignore
+      }
       setUser(null);
       setError(null);
+      try {
+        const { router } = await import("expo-router");
+        router.replace("/login");
+      } catch {
+        // ignore
+      }
     }
   }, []);
 
   const isAuthenticated = useMemo(() => Boolean(user), [user]);
 
   useEffect(() => {
-    console.log("[useAuth] useEffect triggered, autoFetch:", autoFetch, "platform:", Platform.OS);
     if (autoFetch) {
       if (Platform.OS === "web") {
-        // Web: fetch user from API directly (user will login manually if needed)
-        console.log("[useAuth] Web: fetching user from API...");
         fetchUser();
       } else {
-        // Native: check for cached user info first for faster initial load
+        // Native: check for cached user info first for instant load, then validate session
         Auth.getUserInfo().then((cachedUser) => {
-          console.log("[useAuth] Native cached user check:", cachedUser);
           if (cachedUser) {
-            console.log("[useAuth] Native: setting cached user immediately");
             setUser(cachedUser);
             setLoading(false);
-          } else {
-            // No cached user, check session token
-            fetchUser();
           }
+          fetchUser();
         });
       }
     } else {
-      console.log("[useAuth] autoFetch disabled, setting loading to false");
       setLoading(false);
     }
   }, [autoFetch, fetchUser]);

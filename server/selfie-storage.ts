@@ -3,9 +3,21 @@ import path from "path";
 import type { Express, Request, Response } from "express";
 import { sdk } from "./_core/sdk";
 
-const UPLOADS_DIR = path.join(process.cwd(), "uploads", "selfies");
+const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(process.cwd(), "uploads", "selfies");
 const RETENTION_DAYS = 180; // 6 Months (approx 180 days)
 const RETENTION_MS = RETENTION_DAYS * 24 * 60 * 60 * 1000;
+
+/**
+ * Extract the employee owner ID from an evidence filename.
+ * Pattern: ${action}-${employeeId}-${timestamp}-${rand}.jpg
+ * Anchored from the right: /-(\d+)-(\d{10,})-[a-z0-9]+\.jpg$/i
+ */
+export function extractEvidenceOwnerId(filename: string): number | null {
+  const match = filename.match(/-(\d+)-(\d{10,})-[a-z0-9]+\.jpg$/i);
+  if (!match) return null;
+  const id = parseInt(match[1], 10);
+  return isNaN(id) ? null : id;
+}
 
 // Ensure upload directory exists
 export function initSelfieStorage(app: Express) {
@@ -29,15 +41,27 @@ export function initSelfieStorage(app: Express) {
 
       if (!isDevBypass) {
         const authUser = await sdk.authenticateRequest(req);
+        const requestedFilename = path.basename(req.path);
+        const ownerId = extractEvidenceOwnerId(requestedFilename);
+
         if (authUser.role === "employee") {
-          const requestedFilename = path.basename(req.path);
-          const parts = requestedFilename.split("-");
-          // file pattern: ${action}-${employeeId}-${timestamp}-${rand}.jpg
-          if (parts.length >= 3 && parts[1] && parts[1] !== "emp") {
-            const targetEmpId = parts[1];
-            if (targetEmpId !== String(authUser.id) && targetEmpId !== authUser.openId) {
+          if (ownerId === null || ownerId !== authUser.id) {
+            return res.status(403).json({
+              error: "Forbidden: You do not have permission to view another employee's evidence",
+            });
+          }
+        } else if (authUser.role === "manager") {
+          if (ownerId === null) {
+            return res.status(403).json({
+              error: "Forbidden: Invalid evidence filename format",
+            });
+          }
+          if (ownerId !== authUser.id) {
+            const { getUserById } = await import("./db");
+            const targetUser = await getUserById(ownerId);
+            if (!targetUser || targetUser.managerId !== authUser.id) {
               return res.status(403).json({
-                error: "Forbidden: You do not have permission to view another employee's evidence",
+                error: "Forbidden: You do not have permission to view evidence for employees outside your team",
               });
             }
           }

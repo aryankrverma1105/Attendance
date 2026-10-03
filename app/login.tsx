@@ -9,7 +9,8 @@ import { FieldButton, StatusChip } from "@/components/field-ui";
 import { ScreenContainer } from "@/components/screen-container";
 import { useFieldData } from "@/lib/field-data";
 import { getApiBaseUrl } from "@/constants/oauth";
-import { trpc } from "@/lib/trpc";
+import { trpc, trpcClient } from "@/lib/trpc";
+import { resumeQueue } from "@/lib/offline-sync";
 
 export default function LoginScreen() {
   const router = useRouter();
@@ -26,6 +27,30 @@ export default function LoginScreen() {
   const [isVerifying, setIsVerifying] = useState(false);
 
   const activateMutation = trpc.auth.activate.useMutation();
+
+  const handlePostLogin = async (token: string, user: any) => {
+    const { setSessionToken, setUserInfo } = require("@/lib/_core/auth");
+    await setSessionToken(token);
+    if (user) {
+      await setUserInfo(user);
+      setServerSession(user);
+    }
+    resumeQueue();
+
+    if (Platform.OS !== "web") {
+      try {
+        const { registerForPushNotificationsAsync } = await import("@/lib/push-notifications");
+        const pushToken = await registerForPushNotificationsAsync();
+        if (pushToken) {
+          await trpcClient.notifications.registerDevice.mutate({ expoPushToken: pushToken }).catch((err) => {
+            console.warn("[Push] Failed to register device push token:", err);
+          });
+        }
+      } catch (pushErr) {
+        console.warn("[Push] Non-fatal push registration error:", pushErr);
+      }
+    }
+  };
 
   const requestAuthentication = async () => {
     let cleanPhone = identifier.trim();
@@ -70,18 +95,12 @@ export default function LoginScreen() {
         const loginData = await res.json().catch(() => null);
 
         if (!res.ok || !loginData?.success || !loginData?.token) {
-          setNotice(loginData?.message || "Invalid credentials or account inactive.");
+          setNotice(loginData?.error ?? loginData?.message ?? "Invalid credentials or account inactive.");
           setIsRequesting(false);
           return;
         }
 
-        const { setSessionToken, setUserInfo } = require("@/lib/_core/auth");
-        await setSessionToken(loginData.token);
-        if (loginData.user) {
-          await setUserInfo(loginData.user);
-          setServerSession(loginData.user);
-        }
-
+        await handlePostLogin(loginData.token, loginData.user);
         router.replace("/(tabs)");
         return;
       } catch (err: any) {
@@ -192,10 +211,7 @@ export default function LoginScreen() {
       const result = await activateMutation.mutateAsync({ idToken });
 
       if (result?.success && result?.user && result?.token) {
-        const { setSessionToken, setUserInfo } = require("@/lib/_core/auth");
-        await setSessionToken(result.token);
-        await setUserInfo(result.user);
-        setServerSession(result.user);
+        await handlePostLogin(result.token, result.user);
         router.replace("/(tabs)");
         return;
       } else {

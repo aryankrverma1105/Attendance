@@ -45,7 +45,7 @@ const config: ExpoConfig = {
     },
     edgeToEdgeEnabled: true,
     predictiveBackGestureEnabled: false,
-    googleServicesFile: "./google-services.json",
+    googleServicesFile: process.env.GOOGLE_SERVICES_JSON || "./google-services.json",
     package: env.androidPackage,
     permissions: [
       "POST_NOTIFICATIONS",
@@ -81,7 +81,7 @@ const config: ExpoConfig = {
         backgroundColor: "#FFFFFF",
       },
     ],
-    ["expo-build-properties", { android: { buildArchs: ["armeabi-v7a", "arm64-v8a"], minSdkVersion: 24 } }],
+    ["expo-build-properties", { android: { buildArchs: ["armeabi-v7a", "arm64-v8a"], minSdkVersion: 24, usesCleartextTraffic: false } }],
   ],
   experiments: { typedRoutes: true, reactCompiler: true },
 };

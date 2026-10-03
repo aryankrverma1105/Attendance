@@ -265,3 +265,22 @@ gcloud sql instances clone attendance-mysql attendance-mysql-recovery
 1. Standalone Android APK build generation on EAS (`eas build -p android`) to test on physical OEM Android devices (Xiaomi/Samsung).
 2. Production Firebase FCM Server Key setup in `FIREBASE_SERVICE_ACCOUNT` for physical push notification delivery.
 3. Execution of `0004_odd_toxin.sql` against the live Cloud SQL instance following the pre-migration snapshot runbook.
+
+### 14. Initial Admin Password Setup
+To set or reset a password for an administrator (or any workforce user) to enable password-based login:
+
+```bash
+npx tsx scripts/set-password.ts <phone> <newPassword>
+```
+
+Example:
+```bash
+npx tsx scripts/set-password.ts +919835916278 "MyStrongAdminPassword123!"
+```
+
+This utility:
+1. Formats the phone to E.164 and queries the MySQL `users` table.
+2. Hashes the password using `bcrypt` (10 salt rounds).
+3. Stores `passwordHash` and automatically increments `tokenVersion` (invalidating any old sessions).
+4. Enables immediate password login at `/api/auth/password-login` or in the mobile/web app sign-in screen.
+

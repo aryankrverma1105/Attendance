@@ -1,6 +1,7 @@
 import "@/global.css";
 import "react-native-reanimated";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryCache, QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { handleGlobalUnauthorized } from "@/lib/_core/auth";
 import { Stack, useRouter, useSegments } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -23,7 +24,7 @@ import "@/lib/_core/nativewind-pressable";
 import { getSessionRedirect } from "@/lib/session-routing";
 import { registerForPushNotificationsAsync, setupNotificationListeners } from "@/lib/push-notifications";
 import * as Network from "expo-network";
-import { resetStuckSyncingOperations, flushOfflineQueue, dispatchQueuedOperation } from "@/lib/offline-sync";
+import { resetStuckSyncingOperations, flushOfflineQueue, dispatchQueuedOperation, resumeQueue } from "@/lib/offline-sync";
 
 const DEFAULT_WEB_INSETS: EdgeInsets = { top: 0, right: 0, bottom: 0, left: 0 };
 const DEFAULT_WEB_FRAME: Rect = { x: 0, y: 0, width: 0, height: 0 };
@@ -73,6 +74,7 @@ function SessionGate({ children }: { children: ReactNode }) {
           signOut();
         } else {
           lastActiveRef.current = Date.now();
+          resumeQueue();
         }
       } else if (nextState === "background" || nextState === "inactive") {
         lastActiveRef.current = Date.now();
@@ -138,7 +140,19 @@ export default function RootLayout() {
   }, [handleSafeAreaUpdate]);
 
   const [queryClient] = useState(
-    () => new QueryClient({ defaultOptions: { queries: { refetchOnWindowFocus: false, retry: 1 } } }),
+    () =>
+      new QueryClient({
+        queryCache: new QueryCache({
+          onError: (error: any) => {
+            const code = error?.data?.code || error?.code;
+            const status = error?.data?.httpStatus || error?.status;
+            if (code === "UNAUTHORIZED" || status === 401) {
+              handleGlobalUnauthorized();
+            }
+          },
+        }),
+        defaultOptions: { queries: { refetchOnWindowFocus: false, retry: 1 } },
+      }),
   );
 
   useEffect(() => {
@@ -162,10 +176,19 @@ export default function RootLayout() {
       console.warn("[OfflineSync] Network listener setup error:", netErr);
     }
 
-    // 4. Auto-flush when app returns to foreground
-    const appStateSub = AppState.addEventListener("change", (state: AppStateStatus) => {
+    // 4. Auto-flush when app returns to foreground with a valid session token
+    const appStateSub = AppState.addEventListener("change", async (state: AppStateStatus) => {
       if (state === "active") {
-        flushOfflineQueue(dispatchQueuedOperation).catch(() => {});
+        try {
+          const { getSessionToken } = await import("@/lib/_core/auth");
+          const token = await getSessionToken();
+          if (token) {
+            resumeQueue();
+            flushOfflineQueue(dispatchQueuedOperation).catch(() => {});
+          }
+        } catch {
+          // ignore
+        }
       }
     });
 

@@ -50,7 +50,9 @@ export async function getUserInfo(): Promise<User | null> {
   try {
     let info: string | null = null;
     if (Platform.OS === "web") {
-      info = window.localStorage.getItem(USER_INFO_KEY);
+      if (typeof window !== "undefined" && window.localStorage) {
+        info = window.localStorage.getItem(USER_INFO_KEY);
+      }
     } else {
       info = await SecureStore.getItemAsync(USER_INFO_KEY);
     }
@@ -68,7 +70,9 @@ export async function getUserInfo(): Promise<User | null> {
 export async function setUserInfo(user: User): Promise<void> {
   try {
     if (Platform.OS === "web") {
-      window.localStorage.setItem(USER_INFO_KEY, JSON.stringify(user));
+      if (typeof window !== "undefined" && window.localStorage) {
+        window.localStorage.setItem(USER_INFO_KEY, JSON.stringify(user));
+      }
       return;
     }
     await SecureStore.setItemAsync(USER_INFO_KEY, JSON.stringify(user));
@@ -80,7 +84,9 @@ export async function setUserInfo(user: User): Promise<void> {
 export async function clearUserInfo(): Promise<void> {
   try {
     if (Platform.OS === "web") {
-      window.localStorage.removeItem(USER_INFO_KEY);
+      if (typeof window !== "undefined" && window.localStorage) {
+        window.localStorage.removeItem(USER_INFO_KEY);
+      }
       return;
     }
     await SecureStore.deleteItemAsync(USER_INFO_KEY);
@@ -88,3 +94,48 @@ export async function clearUserInfo(): Promise<void> {
     console.error("[Auth] Failed to clear user info:", error);
   }
 }
+
+let _isHandlingUnauthorized = false;
+
+/**
+ * Global 401 / UNAUTHORIZED handler:
+ * Clears session token, cached user info, offline-queue pause state, and redirects to /login.
+ * Excludes login / activation endpoints.
+ */
+export async function handleGlobalUnauthorized(endpointUrlOrPath?: string): Promise<void> {
+  if (endpointUrlOrPath) {
+    const lower = endpointUrlOrPath.toLowerCase();
+    const isLoginEndpoint =
+      lower.includes("password-login") ||
+      lower.includes("/login") ||
+      lower.includes("auth.activate");
+    if (isLoginEndpoint) return;
+  }
+
+  if (_isHandlingUnauthorized) return;
+  _isHandlingUnauthorized = true;
+
+  try {
+    await removeSessionToken();
+    await clearUserInfo();
+
+    try {
+      const { resumeQueue } = await import("@/lib/offline-sync");
+      resumeQueue();
+    } catch {
+      // ignore
+    }
+
+    try {
+      const { router } = await import("expo-router");
+      router.replace("/login");
+    } catch (err) {
+      console.warn("[Auth] Failed to route to /login on 401:", err);
+    }
+  } finally {
+    setTimeout(() => {
+      _isHandlingUnauthorized = false;
+    }, 2000);
+  }
+}
+
